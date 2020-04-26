@@ -20,10 +20,10 @@ package raft
 import "sync"
 import "sync/atomic"
 import "../labrpc"
-
+import "math/rand"
+import "time"
 // import "bytes"
 // import "../labgob"
-
 
 
 //
@@ -37,10 +37,33 @@ import "../labrpc"
 // snapshots) on the applyCh; at that point you can add fields to
 // ApplyMsg, but set CommandValid to false for these other uses.
 //
+
+/*
+ *  Raft node's state
+ */
+type State string
+
+const(
+	Leader State = "Leader"
+	Candidate = "Candidate"
+	Follower = "Follower"
+)
+
+/*
+ * ApplyMessage sent to applyCh
+ */
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+}
+
+/*
+ * Log Entry
+ */
+type Entry struct {
+	Command      interface{}
+	Term         int              // term when create this entry
 }
 
 //
@@ -57,15 +80,61 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	// state
+	state 		State
+
+	// persistent field
+	currentTerm int 			  // currentTerm
+	votedFor 	int   			  // candidateId that received vote in current term (or null if none)
+	log         []Entry  	      // log entries
+
+	// volatile filed
+	commitIndex int 
+	lastApplied int
+
+	// election time
+	electionTime int 			  // election time
+
+	// leader's field
+	nextIndex   []int
+	matchIndex  []int
 }
 
+
+//
+// init raft node with log capacity
+//
+func (rf *Raft) initRaftNodeToFollower(logCapacity int) {
+	rf.state = "Follower"
+
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.log = make([]Entry, 1, logCapacity)
+
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+
+	rand.Seed(time.Now().UnixNano())
+	rf.electionTime = rand.Intn(300) + 500
+
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+}
+
+//
 // return currentTerm and whether this server
 // believes it is the leader.
+//
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
-	// Your code here (2A).
+	
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	term = rf.currentTerm
+	isleader = (rf.state == "Leader")
+
 	return term, isleader
 }
 
@@ -108,15 +177,19 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
-
+/***************************************************************************
+							Request Vote RPC
+***************************************************************************/
 
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
+	CandidateTerm 		 	int   
+	CandidateId  		    int
+	LastLogIndex 			int
+	LastLogTerm   			int
 }
 
 //
@@ -124,15 +197,74 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 //
 type RequestVoteReply struct {
-	// Your data here (2A).
+	FollowerTerm  			int
+	VotedGranted 			bool
 }
+
 
 //
 // example RequestVote RPC handler.
 //
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
+func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) error {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.FollowerTerm = rf.currentTerm
+
+	// 先比较term,再看是否vote,如果都OK则比较谁更up-to-date
+
+	// 如果candidate的term比follower要小,就拒绝
+	if rf.currentTerm > args.CandidateTerm {
+		reply.VotedGranted = false
+		DPrintf("raft/raft.go: Server (%d)[state=%s, term=%d, votedFor=%d] refuse RequestVote from Server (%d)[CandidateTerm=%d]",
+				rf.me, rf.state, rf.currentTerm, rf.votedFor, args.CandidateId, args.CandidateTerm)
+		return nil
+	} else if rf.currentTerm == args.CandidateTerm {
+		if  rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+			reply.VotedGranted = false
+			DPrintf("raft/raft.go: Server (%d)[state=%s, term=%d, votedFor=%d] refuse RequestVote from Server (%d)[CandidateTerm=%d]",
+				rf.me, rf.state, rf.currentTerm, rf.votedFor, args.CandidateId, args.CandidateTerm)
+			return nil
+		} 
+
+		// 如果candidate的log不如follower的up-to-date，就拒绝
+		var lastLogTerm = -1
+		if rf.log != nil {
+			lastLogTerm = rf.log[len(rf.log)-1].Term
+		}
+		// 谁的lastLogTerm更大，谁更up-to-date
+		if args.LastLogTerm < lastLogTerm {
+			reply.VotedGranted = false
+			DPrintf("raft/raft.go: Server (%d)[state=%s, term=%d, votedFor=%d, lastLogTerm=%d] refuse RequestVote from Server (%d)[CandidateTerm=%d, LastLogTerm=%d]",
+					rf.me, rf.state, rf.currentTerm, rf.votedFor, lastLogTerm, args.CandidateId, args.CandidateTerm, args.LastLogTerm)
+			return nil
+		}
+		// 如果lastLogTerm相等,则比较log的长短
+		if args.LastLogTerm == lastLogTerm {
+			var lastLogIndex = len(rf.log) - 1
+			if args.LastLogIndex < lastLogIndex {
+				reply.VotedGranted = false
+				DPrintf("raft/raft.go: Server (%d)[state=%s, term=%d, votedFor=%d, lastLogTerm=%d, lastLogIndex=%d] refuse RequestVote from Server (%d)[CandidateTerm=%d, LastLogTerm=%d, LastLogIndex=%d]",
+					rf.me, rf.state, rf.currentTerm, rf.votedFor, lastLogTerm, lastLogIndex, args.CandidateId, args.CandidateTerm, args.LastLogTerm, args.LastLogIndex)
+				return nil
+			}
+		}
+	}
+
+	// it is ok to vote for this candidate and update follower state
+	rf.currentTerm = args.CandidateTerm
+	rf.votedFor = args.CandidateId
+	// 不管raft node现在的状态是什么, 对于一个合理的RequestVote的RPC,都要将其状态设置为Follower
+	// 如果raft node是Candidate/Leader, 那遇到一个比自己Term要高的，需要滚回到Follower(不可能Term相同,因为如果Term相同,则该Candidate已经为自己投过票)
+	rf.state = "Follower"
+	// 根据test的需要,需要将election time设置为 500ms ～ 800ms 之间的随机数字, 而HeartBeat设置为
+	// 每200ms一次HeartBeat,这样每秒内5次HeartBeat,满足test需要
+	
+	rf.electionTime = rand.Intn(300) + 500
+	reply.VotedGranted = true
+	return nil
 }
+
 
 //
 // example code to send a RequestVote RPC to a server.
@@ -167,6 +299,78 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
+
+
+/***************************************************************************
+							Append Entries RPC
+***************************************************************************/
+//
+// example AppendEntries RPC arguments structure.
+// field names must start with capital letters!
+//
+type AppendEntriesArgs struct {
+	LeaderTerm				int
+	LeaderId				int
+	PrevLogIndex			int
+	PrevLogTerm				int
+	LeaderCommitIndex 		int
+	Entries 				[]Entry
+}
+
+//
+// example AppendEntries RPC reply structure.
+// field names must start with capital letters!
+//
+type AppendEntriesReply struct {
+	FollowerTerm  			int
+	IsSuccess 			    bool
+}
+
+//
+// example AppendEntries RPC handler.
+//
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) error {
+
+}
+
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+/***************************************************************************
+							Life Cycle
+***************************************************************************/
+func (rf *Raft) raftServerBeginAdventure() {
+	while(1) {
+		if rf.state == "Follower" {
+			// 模拟倒计时
+			// 当reset election time时, 重新开始sleep
+			while(rf.electionTime > 0) {
+				time.Sleep(10 * time.Millisecond);
+				rf.electionTime = rf.electionTime - 10;
+			}
+			// 睡眠结束，成为candidate
+			DPrintf("raft/raft.go: Server (%d)[state=%s, term=%d, votedFor=%d] wake up", rf.me, rf.state, rf.currentTerm, rf.votedFor)
+			rf.mu.Lock()
+			rf.currentTerm = rf.currentTerm + 1
+			rf.state = "Candidate"
+			rf.votedFor = rf.me
+			rf.mu.Unlock()
+
+			// start send RequestVote 
+
+
+		}else if rf.state == "Candidate" {
+
+		}else {
+
+		}
+
+	}
+}
+
 
 
 //
@@ -233,11 +437,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// Your initialization code here (2A, 2B, 2C).
+	const Log_CAPACITY int = 100
+	rf.initRaftNodeToFollower(Log_CAPACITY)
+
+	go rf.raftServerBeginAdventure()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 
 	return rf
 }
