@@ -23,30 +23,21 @@ func TestRequestVote(t *testing.T) {
 	requestVoteArgs.LastLogIndex = 0
 	requestVoteArgs.LastLogTerm = 0
 
-	err := rf.RequestVote(&requestVoteArgs, &requestVoteReply)
-	if err == nil {
-		DPrintf("raft/raft_unit_test.go: requestVoteReply.FollowerTerm = %d, requestVoteReply.VotedGranted = %t\n", requestVoteReply.FollowerTerm, requestVoteReply.VotedGranted)
-	}else{
-		fmt.Println(err)
-	}
+	rf.RequestVote(&requestVoteArgs, &requestVoteReply)
+	DPrintf("raft/raft_unit_test.go: requestVoteReply.FollowerTerm = %d, requestVoteReply.VotedGranted = %t\n", requestVoteReply.FollowerTerm, requestVoteReply.VotedGranted)
+	
 
 	requestVoteArgs.CandidateTerm = 1
 	requestVoteArgs.CandidateId = 2
-	err = rf.RequestVote(&requestVoteArgs, &requestVoteReply)
-	if err == nil {
-		DPrintf("raft/raft_unit_test.go: requestVoteReply.FollowerTerm = %d, requestVoteReply.VotedGranted = %t\n", requestVoteReply.FollowerTerm, requestVoteReply.VotedGranted)
-	}else{
-		fmt.Println(err)
-	}
+	rf.RequestVote(&requestVoteArgs, &requestVoteReply)
+	DPrintf("raft/raft_unit_test.go: requestVoteReply.FollowerTerm = %d, requestVoteReply.VotedGranted = %t\n", requestVoteReply.FollowerTerm, requestVoteReply.VotedGranted)
+	
 
 	requestVoteArgs.CandidateTerm = 2
 	requestVoteArgs.CandidateId = 2
-	err = rf.RequestVote(&requestVoteArgs, &requestVoteReply)
-	if err == nil {
-		DPrintf("raft/raft_unit_test.go: requestVoteReply.FollowerTerm = %d, requestVoteReply.VotedGranted = %t\n", requestVoteReply.FollowerTerm, requestVoteReply.VotedGranted)
-	}else{
-		fmt.Println(err)
-	}
+	rf.RequestVote(&requestVoteArgs, &requestVoteReply)
+	DPrintf("raft/raft_unit_test.go: requestVoteReply.FollowerTerm = %d, requestVoteReply.VotedGranted = %t\n", requestVoteReply.FollowerTerm, requestVoteReply.VotedGranted)
+	
 
 	fmt.Println("--------------------------------------")
 	fmt.Println("End To Test Request Vote RPC Handler")
