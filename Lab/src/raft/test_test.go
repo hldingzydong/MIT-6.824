@@ -94,7 +94,7 @@ func TestReElection2A(t *testing.T) {
 
 	cfg.end()
 }
-
+/*
 func TestBasicAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -348,7 +348,7 @@ loop:
 
 	cfg.end()
 }
-
+*/
 
 func TestRejoin2B(t *testing.T) {
 	servers := 3
