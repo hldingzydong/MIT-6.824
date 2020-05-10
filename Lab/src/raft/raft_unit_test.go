@@ -24,19 +24,19 @@ func TestRequestVote(t *testing.T) {
 	requestVoteArgs.LastLogTerm = 0
 
 	rf.RequestVote(&requestVoteArgs, &requestVoteReply)
-	DPrintf("raft/raft_unit_test.go: requestVoteReply.FollowerTerm = %d, requestVoteReply.VotedGranted = %t\n", requestVoteReply.FollowerTerm, requestVoteReply.VotedGranted)
+	DRVPrintf("raft/raft_unit_test.go: requestVoteReply.FollowerTerm = %d, requestVoteReply.VotedGranted = %t\n", requestVoteReply.FollowerTerm, requestVoteReply.VotedGranted)
 	
 
 	requestVoteArgs.CandidateTerm = 1
 	requestVoteArgs.CandidateId = 2
 	rf.RequestVote(&requestVoteArgs, &requestVoteReply)
-	DPrintf("raft/raft_unit_test.go: requestVoteReply.FollowerTerm = %d, requestVoteReply.VotedGranted = %t\n", requestVoteReply.FollowerTerm, requestVoteReply.VotedGranted)
+	DRVPrintf("raft/raft_unit_test.go: requestVoteReply.FollowerTerm = %d, requestVoteReply.VotedGranted = %t\n", requestVoteReply.FollowerTerm, requestVoteReply.VotedGranted)
 	
 
 	requestVoteArgs.CandidateTerm = 2
 	requestVoteArgs.CandidateId = 2
 	rf.RequestVote(&requestVoteArgs, &requestVoteReply)
-	DPrintf("raft/raft_unit_test.go: requestVoteReply.FollowerTerm = %d, requestVoteReply.VotedGranted = %t\n", requestVoteReply.FollowerTerm, requestVoteReply.VotedGranted)
+	DRVPrintf("raft/raft_unit_test.go: requestVoteReply.FollowerTerm = %d, requestVoteReply.VotedGranted = %t\n", requestVoteReply.FollowerTerm, requestVoteReply.VotedGranted)
 	
 
 	fmt.Println("--------------------------------------")
