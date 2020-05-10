@@ -587,7 +587,7 @@ func (rf *Raft) sendAppendEntriesToMultipleFollowers() {
 
         go rf.commitEntries()
 
-        time.Sleep(200 * time.Millisecond)
+        time.Sleep(100 * time.Millisecond)
     }
 }
 
@@ -851,5 +851,5 @@ func Make(peers []*labrpc.ClientEnd, me int,
 //
 func generateElectionTime() int {
     rand.Seed(time.Now().UnixNano())
-    return rand.Intn(100)*2 + 400
+    return rand.Intn(100) + 300
 }
