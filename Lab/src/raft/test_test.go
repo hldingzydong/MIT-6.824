@@ -94,7 +94,7 @@ func TestReElection2A(t *testing.T) {
 
 	cfg.end()
 }
-/*
+
 func TestBasicAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -348,7 +348,7 @@ loop:
 
 	cfg.end()
 }
-*/
+
 
 func TestRejoin2B(t *testing.T) {
 	servers := 3
@@ -358,38 +358,38 @@ func TestRejoin2B(t *testing.T) {
 	cfg.begin("Test (2B): rejoin of partitioned leader")
 
 	cfg.one(101, servers, true)
-	// fmt.Println("Test (2A): cfg.one(101, servers, true)")
+	//fmt.Println("Test (2B): cfg.one(101, servers, true)")
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
-	// fmt.Println("Test (2A): cfg.checkOneLeader()")
+	//fmt.Println("Test (2B): cfg.checkOneLeader()")
 	cfg.disconnect(leader1)
-	// fmt.Println("Test (2A): cfg.disconnect(leader1)")
+	//fmt.Printf("Test (2B): cfg.disconnect(%d)\n", leader1)
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
-	// fmt.Println("Test (2A): cfg.rafts[leader1].Start(102)")
+	//fmt.Println("Test (2B): cfg.rafts[leader1].Start(102)")
 	cfg.rafts[leader1].Start(103)
-	// fmt.Println("Test (2A): cfg.rafts[leader1].Start(103)")
+	//fmt.Println("Test (2B): cfg.rafts[leader1].Start(103)")
 	cfg.rafts[leader1].Start(104)
-	// fmt.Println("Test (2A): cfg.rafts[leader1].Start(104)")
+	//fmt.Println("Test (2B): cfg.rafts[leader1].Start(104)")
 
 	// new leader commits, also for index=2
 	cfg.one(103, 2, true)
-	// fmt.Println("Test (2A): cfg.one(103, 2, true)")
+	//fmt.Println("Test (2B): cfg.one(103, 2, true)")
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
-	// fmt.Println("Test (2A): cfg.checkOneLeader()")
+	//fmt.Println("Test (2B): cfg.checkOneLeader()")
 	cfg.disconnect(leader2)
-	// fmt.Println("Test (2A): cfg.disconnect(leader2)")
+	//fmt.Printf("Test (2B): cfg.disconnect(%d)\n", leader2)
 	// old leader connected again
 	cfg.connect(leader1)
-	// fmt.Println("Test (2A): cfg.connect(leader1)")
+	//fmt.Printf("Test (2B): cfg.connect(%d)\n", leader1)
 	cfg.one(104, 2, true)
-	// fmt.Println("Test (2A): cfg.one(104, 2, true)")
+	//fmt.Println("Test (2B): cfg.one(104, 2, true)")
 	// all together now
 	cfg.connect(leader2)
-	// fmt.Println("Test (2A): cfg.connect(leader2)")
+	//fmt.Printf("Test (2B): cfg.connect(%d)\n", leader2)
 	cfg.one(105, servers, true)
-	// fmt.Println("Test (2A): cfg.one(105, servers, true)")
+	//fmt.Println("Test (2B): cfg.one(105, servers, true)")
 	cfg.end()
 }
 
@@ -472,12 +472,14 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect(other)
 	//fmt.Printf("Test (2B): cfg.connect(server %d)\n", other)
 
+	// time.Sleep(RaftElectionTimeout / 2)
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
 	//fmt.Println("Test (2B): cfg.one(rand.Int(), 3, true) --- 50 times")
 	//fmt.Println("")
+	
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
@@ -485,7 +487,7 @@ func TestBackup2B(t *testing.T) {
 	//fmt.Println("Test (2B): cfg.connect all the servers")
 	cfg.one(rand.Int(), servers, true)
 	//fmt.Println("Test (2B): cfg.one(rand.Int(), servers, true)")
-
+	
 	cfg.end()
 
 }

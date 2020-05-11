@@ -306,27 +306,27 @@ func (rf *Raft) requestForVotes() {
     var tmpMutex sync.Mutex
     cond := sync.NewCond(&tmpMutex)
 
-    var args RequestVoteArgs
-    rf.mu.Lock()
-    args.CandidateTerm = rf.currentTerm
-    args.CandidateId = rf.me
-    args.LastLogIndex = len(rf.log)-1
-    args.LastLogTerm = rf.log[args.LastLogIndex].Term
-    rf.mu.Unlock()
-
-    for i := 0; i < len(rf.peers) && rf.state == "Candidate"; i++ {
+    for i := 0; i < len(rf.peers); i++ {
         if i == rf.me {
             continue
         }else{
-            go func(follower int, args RequestVoteArgs) {
+            go func(follower int) {
+                var args RequestVoteArgs
                 var reply RequestVoteReply
+
+                rf.mu.Lock()
+                args.CandidateTerm = rf.currentTerm
+                args.CandidateId = rf.me
+                args.LastLogIndex = len(rf.log)-1
+                args.LastLogTerm = rf.log[args.LastLogIndex].Term
+                rf.mu.Unlock()
 
                 vote := rf.sendRequestVote(follower, &args, &reply)
                 
                 tmpMutex.Lock()
                 defer tmpMutex.Unlock()
 
-                finished++
+                rf.mu.Lock()
                 if vote && rf.currentTerm == args.CandidateTerm {
                     if reply.VotedGranted == true {
                         DRVPrintf("Server (%d)[state=%s, term=%d, votedFor=%d] receive Vote from Server (%d)[term=%d]", rf.me, rf.state, rf.currentTerm, rf.votedFor, follower, reply.FollowerTerm)
@@ -334,11 +334,16 @@ func (rf *Raft) requestForVotes() {
                     } else if reply.FollowerTerm > args.CandidateTerm {
                         DRVPrintf("Server (%d)[state=%s, term=%d, votedFor=%d] meet higher term from Server (%d)[term=%d]", rf.me, rf.state, rf.currentTerm, rf.votedFor, follower, reply.FollowerTerm)
                         meetHigherTerm = reply.FollowerTerm
+                    } else{
+                        DRVPrintf("Server (%d)[state=%s, term=%d, votedFor=%d] is refused by Server (%d)[term=%d]", rf.me, rf.state, rf.currentTerm, rf.votedFor, follower, reply.FollowerTerm)
                     }
                 }
+                rf.mu.Unlock()
+
+                finished++
                 // 告知主线程 Server[i]已reply
                 cond.Broadcast()
-            }(i, args)
+            }(i)
         }
     }
 
@@ -354,18 +359,25 @@ func (rf *Raft) requestForVotes() {
             rf.currentTerm = meetHigherTerm
         }
     }
-    rf.mu.Unlock()
-    tmpMutex.Unlock()
-
+    
     if rf.state == "Candidate" {
         if count >= len(rf.peers)/2 {
             DRVPrintf("Server (%d)[state=%s, term=%d, votedFor=%d] finished RequestVote and become leader", rf.me, rf.state, rf.currentTerm, rf.votedFor)
+            rf.mu.Unlock()
+            tmpMutex.Unlock()
             rf.leaderChan <- 0
+            return
         }else{ //如果遇到 higher term 或者 大多数的reply是false
             DRVPrintf("Server (%d)[state=%s, term=%d, votedFor=%d] finished RequestVote and back to follower", rf.me, rf.state, rf.currentTerm, rf.votedFor)
+            rf.mu.Unlock()
+            tmpMutex.Unlock()
             rf.followerChan <- 0
+            return
         }
     }
+
+    rf.mu.Unlock()
+    tmpMutex.Unlock()
 }
 
 /***************************************************************************
@@ -486,16 +498,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
                 }(rf.commitIndex, len(rf.log))
             }
         }
-    }
-    rf.mu.Unlock()
+    } 
 
     if rf.currentTerm < args.LeaderTerm || reply.IsSuccess {
-        rf.mu.Lock()
         rf.currentTerm = args.LeaderTerm
         rf.resetElectionTime = true
         rf.mu.Unlock()
         rf.followerChan <- 0
+        return
     }
+    rf.mu.Unlock()
 }
 
 
@@ -514,16 +526,16 @@ func (rf *Raft) sendAppendEntriesToMultipleFollowers() {
     for !rf.killed() {
         DAEPrintf("Server (%d) start to send Append Entries", rf.me)
         
-        for i := 0; i < len(rf.peers) && rf.state == "Leader"; i++ {
+        for i := 0; i < len(rf.peers); i++ {
             if i == rf.me {
                 continue
             }else{
                 go func(followerId int) {
+                    rf.mu.Lock()
                     if rf.state == "Leader"{
                         var args AppendEntriesArgs
                         var reply AppendEntriesReply
 
-                        rf.mu.Lock()
                         args.LeaderId = rf.me
                         args.LeaderTerm = rf.currentTerm
                         args.PrevLogIndex = rf.nextIndex[followerId]-1
@@ -562,6 +574,8 @@ func (rf *Raft) sendAppendEntriesToMultipleFollowers() {
                                 rf.matchIndex[followerId] = args.PrevLogIndex + len(args.Entries)
                             }
                         }
+                        rf.mu.Unlock()
+                    }else{
                         rf.mu.Unlock()
                     }
                 }(i)
@@ -659,7 +673,7 @@ func (rf *Raft) convertToFollower() {
     rf.mu.Lock()
     DLCPrintf("Server (%d)[state=%s, term=%d, votedFor=%d] convert to Follower", rf.me, rf.state, rf.currentTerm, rf.votedFor)  
     rf.state = "Follower"
-    //rf.votedFor = -1
+    // rf.votedFor = -1
     rf.electionTime = generateElectionTime()
     rf.resetElectionTime = false
     rf.mu.Unlock()
@@ -696,9 +710,13 @@ func (rf *Raft) convertToCandidate() {
         rf.electionTime = rf.electionTime - 5
     }
 
+    rf.mu.Lock()
     if rf.electionTime <= 0 && rf.state == "Candidate" {
         DLCPrintf("Server (%d)[state=%s, term=%d, votedFor=%d, electionTime=%d] election time out and begin a new election round", rf.me, rf.state, rf.currentTerm, rf.votedFor, rf.electionTime)
+        rf.mu.Unlock()
         rf.candidateChan <- 0
+    }else{
+        rf.mu.Unlock()
     }
 }
 
@@ -851,5 +869,5 @@ func Make(peers []*labrpc.ClientEnd, me int,
 //
 func generateElectionTime() int {
     rand.Seed(time.Now().UnixNano())
-    return rand.Intn(100) + 300
+    return rand.Intn(75)*2 + 250
 }
