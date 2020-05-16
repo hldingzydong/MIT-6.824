@@ -418,13 +418,13 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
     rf.mu.Lock()
-/*
+
     if len(args.Entries) != 0 {
         DAEPrintf("Server (%d)[term=%d] received Append Entries request[LeaderTerm=%d] from Server (%d)", rf.me, rf.currentTerm, args.LeaderTerm, args.LeaderId)
     }else{
         DAEPrintf("Server (%d) received Heart Beat request from Server (%d)", rf.me, args.LeaderId)
     }
-*/
+
     if rf.currentTerm > args.LeaderTerm {
         reply.IsSuccess = false
         reply.FollowerTerm = rf.currentTerm
@@ -474,7 +474,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
                     // truncate unmatch Follower entries, and apply Leader entries
                     rf.log = rf.log[:(args.PrevLogIndex + 1 + unmatch_idx)]
                     rf.log = append(rf.log, args.Entries[unmatch_idx:]...)
-                    DAEPrintf("Server (%d) append entries and now log is from %v to %v(index=%d)", rf.me, rf.log[1], rf.log[len(rf.log)-1], len(rf.log))
+                    DAEPrintf("Server (%d) append entries and now log is from %v to %v(index=%d)", rf.me, rf.log[1], rf.log[len(rf.log)-1], len(rf.log)-1)
                 }
             }
 
@@ -694,8 +694,8 @@ func (rf *Raft) convertToFollower() {
     rf.resetElectionTime = false
     rf.mu.Unlock()
     for rf.electionTime > 0 && !rf.resetElectionTime {
-        time.Sleep(time.Duration(5) * time.Millisecond)
-        rf.electionTime = rf.electionTime - 5
+        time.Sleep(time.Duration(1) * time.Millisecond)
+        rf.electionTime = rf.electionTime - 1
     }
     if !rf.resetElectionTime {
         //DLCPrintf("Server (%d)[state=%s, term=%d, votedFor=%d, electionTime=%d] wake up", rf.me, rf.state, rf.currentTerm, rf.votedFor, rf.electionTime)
@@ -723,8 +723,8 @@ func (rf *Raft) convertToCandidate() {
     
     // DLCrintf("Server (%d)[state=%s, term=%d, votedFor=%d, electionTime=%d] start to count down", rf.me, rf.state, rf.currentTerm, rf.votedFor, rf.electionTime)
     for rf.electionTime > 0 && rf.state == "Candidate" && !rf.resetElectionTime{
-        time.Sleep(time.Duration(5) * time.Millisecond)
-        rf.electionTime = rf.electionTime - 5
+        time.Sleep(time.Duration(1) * time.Millisecond)
+        rf.electionTime = rf.electionTime - 1
     }
 
     rf.mu.Lock()
@@ -863,7 +863,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.me = me
     rf.applyCh = applyCh
 
-    const Log_CAPACITY int = 200
+    const Log_CAPACITY int = 1200
     rf.initRaftNodeToFollower(Log_CAPACITY)
 
     // initialize from state persisted before a crash
@@ -880,5 +880,5 @@ func Make(peers []*labrpc.ClientEnd, me int,
 //
 func generateElectionTime() int {
     rand.Seed(time.Now().UnixNano())
-    return rand.Intn(100)*2 + 200
+    return rand.Intn(150)*2 + 300
 }

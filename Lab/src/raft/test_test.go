@@ -12,8 +12,8 @@ import "testing"
 import "fmt"
 import "time"
 import "math/rand"
-//import "sync/atomic"
-//import "sync"
+import "sync/atomic"
+import "sync"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -94,7 +94,7 @@ func TestReElection2A(t *testing.T) {
 
 	cfg.end()
 }
-/*
+
 func TestBasicAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -392,7 +392,7 @@ func TestRejoin2B(t *testing.T) {
 	//fmt.Println("Test (2B): cfg.one(105, servers, true)")
 	cfg.end()
 }
-*/
+
 
 func TestBackup2B(t *testing.T) {
 	servers := 5
@@ -491,7 +491,7 @@ func TestBackup2B(t *testing.T) {
 
 }
 
-/*
+
 func TestCount2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -601,8 +601,8 @@ loop:
 
 	cfg.end()
 }
-*/
-/*
+
+
 func TestPersist12C(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -725,6 +725,7 @@ func TestPersist32C(t *testing.T) {
 	cfg.end()
 }
 
+
 //
 // Test the scenarios described in Figure 8 of the extended Raft paper. Each
 // iteration asks a leader, if there is one, to insert a command in the Raft
@@ -793,6 +794,7 @@ func TestFigure82C(t *testing.T) {
 	cfg.end()
 }
 
+
 func TestUnreliableAgree2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true)
@@ -821,7 +823,8 @@ func TestUnreliableAgree2C(t *testing.T) {
 
 	cfg.end()
 }
-*/
+
+/*
 func TestFigure8Unreliable2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true)
@@ -879,7 +882,8 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 	cfg.end()
 }
-/*
+*/
+
 func internalChurn(t *testing.T, unreliable bool) {
 
 	servers := 5
@@ -1032,4 +1036,3 @@ func TestReliableChurn2C(t *testing.T) {
 func TestUnreliableChurn2C(t *testing.T) {
 	internalChurn(t, true)
 }
-*/
