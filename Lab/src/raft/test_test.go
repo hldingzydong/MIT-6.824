@@ -824,7 +824,7 @@ func TestUnreliableAgree2C(t *testing.T) {
 	cfg.end()
 }
 
-/*
+
 func TestFigure8Unreliable2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true)
@@ -857,7 +857,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
 			cfg.disconnect(leader)
-			fmt.Printf("Test (2C): cfg.disconnect(%d)\n", leader)
+			//fmt.Printf("Test (2C): cfg.disconnect(%d)\n", leader)
 			nup -= 1
 		}
 
@@ -865,7 +865,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
 				cfg.connect(s)
-				fmt.Printf("Test (2C): cfg.connect(%d)\n", s)
+				//fmt.Printf("Test (2C): cfg.connect(%d)\n", s)
 				nup += 1
 			}
 		}
@@ -874,7 +874,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 	for i := 0; i < servers; i++ {
 		if cfg.connected[i] == false {
 			cfg.connect(i)
-			fmt.Printf("Test (2C): cfg.connect(%d)\n", i)
+			//fmt.Printf("Test (2C): cfg.connect(%d)\n", i)
 		}
 	}
 
@@ -882,7 +882,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 	cfg.end()
 }
-*/
+
 
 func internalChurn(t *testing.T, unreliable bool) {
 
