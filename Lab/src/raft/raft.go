@@ -474,7 +474,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
                     // truncate unmatch Follower entries, and apply Leader entries
                     rf.log = rf.log[:(args.PrevLogIndex + 1 + unmatch_idx)]
                     rf.log = append(rf.log, args.Entries[unmatch_idx:]...)
-                    DAEPrintf("Server (%d) append entries and now log is %v", rf.me, rf.log)
+                    DAEPrintf("Server (%d) append entries and now log is from %v to %v(index=%d)", rf.me, rf.log[1], rf.log[len(rf.log)-1], len(rf.log))
                 }
             }
 
@@ -816,7 +816,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
         rf.persist()
 
-        DLCPrintf("Leader (%d) append entries and now log is %v", rf.me, rf.log)
+        DLCPrintf("Leader (%d) append entries and now log is from %v to %v(index=%d)", rf.me, rf.log[1], rf.log[len(rf.log)-1], len(rf.log)-1)
     }
     rf.mu.Unlock()
 
@@ -880,5 +880,5 @@ func Make(peers []*labrpc.ClientEnd, me int,
 //
 func generateElectionTime() int {
     rand.Seed(time.Now().UnixNano())
-    return rand.Intn(150)*2 + 300
+    return rand.Intn(100)*2 + 200
 }

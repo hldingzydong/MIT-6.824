@@ -12,8 +12,8 @@ import "testing"
 import "fmt"
 import "time"
 import "math/rand"
-// import "sync/atomic"
-import "sync"
+//import "sync/atomic"
+//import "sync"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -94,7 +94,7 @@ func TestReElection2A(t *testing.T) {
 
 	cfg.end()
 }
-
+/*
 func TestBasicAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -392,7 +392,7 @@ func TestRejoin2B(t *testing.T) {
 	//fmt.Println("Test (2B): cfg.one(105, servers, true)")
 	cfg.end()
 }
-
+*/
 
 func TestBackup2B(t *testing.T) {
 	servers := 5
@@ -472,7 +472,6 @@ func TestBackup2B(t *testing.T) {
 	cfg.connect(other)
 	//fmt.Printf("Test (2B): cfg.connect(server %d)\n", other)
 
-	// time.Sleep(RaftElectionTimeout / 2)
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
@@ -492,7 +491,7 @@ func TestBackup2B(t *testing.T) {
 
 }
 
-
+/*
 func TestCount2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -602,7 +601,8 @@ loop:
 
 	cfg.end()
 }
-
+*/
+/*
 func TestPersist12C(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -745,7 +745,7 @@ func TestFigure82C(t *testing.T) {
 	cfg.one(rand.Int(), 1, true)
 
 	nup := servers
-	for iters := 0; iters < 700; iters++ {
+	for iters := 0; iters < 1000; iters++ {
 		leader := -1
 		for i := 0; i < servers; i++ {
 			if cfg.rafts[i] != nil {
@@ -821,7 +821,7 @@ func TestUnreliableAgree2C(t *testing.T) {
 
 	cfg.end()
 }
-/*
+*/
 func TestFigure8Unreliable2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true)
@@ -854,6 +854,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
 			cfg.disconnect(leader)
+			fmt.Printf("Test (2C): cfg.disconnect(%d)\n", leader)
 			nup -= 1
 		}
 
@@ -861,6 +862,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			s := rand.Int() % servers
 			if cfg.connected[s] == false {
 				cfg.connect(s)
+				fmt.Printf("Test (2C): cfg.connect(%d)\n", s)
 				nup += 1
 			}
 		}
@@ -869,6 +871,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 	for i := 0; i < servers; i++ {
 		if cfg.connected[i] == false {
 			cfg.connect(i)
+			fmt.Printf("Test (2C): cfg.connect(%d)\n", i)
 		}
 	}
 
@@ -876,7 +879,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 	cfg.end()
 }
-*/
+/*
 func internalChurn(t *testing.T, unreliable bool) {
 
 	servers := 5
@@ -1029,3 +1032,4 @@ func TestReliableChurn2C(t *testing.T) {
 func TestUnreliableChurn2C(t *testing.T) {
 	internalChurn(t, true)
 }
+*/
