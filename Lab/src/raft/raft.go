@@ -22,7 +22,6 @@ import "sync/atomic"
 import "../labrpc"
 import "math/rand"
 import "time"
-// import "fmt"
 import "bytes"
 import "../labgob"
 
@@ -77,10 +76,6 @@ type Raft struct {
     me        int                 // this peer's index into peers[]
     dead      int32               // set by Kill()
 
-    // Your data here (2A, 2B, 2C).
-    // Look at the paper's Figure 2 for a description of what
-    // state a Raft server must maintain.
-
     // state
     state       State
 
@@ -89,7 +84,6 @@ type Raft struct {
     votedFor    int               // candidateId that received vote in current term (or null if none)
     leaderId    int               // leader's Id
     log         []Entry           // log entries
-
 
     // volatile filed
     commitIndex int 
@@ -102,11 +96,8 @@ type Raft struct {
     nextIndex   []int
     matchIndex  []int
 
-    // channel to communicate between threads
-    followerChan    chan int
-    candidateChan   chan int
-    leaderChan      chan int
-    resetElectionTime   bool
+    // timer
+    electionTimer  *time.Timer
 
     // apply channel 
     applyCh         chan ApplyMsg
@@ -131,6 +122,7 @@ func (rf *Raft) initRaftNodeToFollower(logCapacity int) {
     rf.lastApplied = 0
 
     rf.electionTime = generateElectionTime()
+    rf.electionTimer = time.NewTimer(time.Duration(rf.electionTime) * time.Millisecond)
 
     rf.nextIndex = make([]int, len(rf.peers))
     rf.matchIndex = make([]int, len(rf.peers))
@@ -138,8 +130,6 @@ func (rf *Raft) initRaftNodeToFollower(logCapacity int) {
         rf.nextIndex[i] = len(rf.log)
         rf.matchIndex[i] = 0
     }
-
-    rf.resetElectionTime = false
 }
 
 //
@@ -164,7 +154,6 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-    // DLCPrintf("persist Server(%d) state(currentTerm=%d, votedFor=%d, logLength=%d) done", rf.me, rf.currentTerm, rf.votedFor, len(rf.log))
     w := new(bytes.Buffer)
     e := labgob.NewEncoder(w)
     e.Encode(rf.currentTerm)
@@ -261,17 +250,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
     if rf.currentTerm < args.CandidateTerm {
         rf.currentTerm = args.CandidateTerm
         if reply.VotedGranted || rf.state != "Follower"{
-            rf.resetElectionTime = true
             rf.persist()
             rf.mu.Unlock()
-            rf.followerChan <- 0
+            rf.convertToFollower()
             return
         }
     }else if reply.VotedGranted {
-        rf.resetElectionTime = true
         rf.persist()
         rf.mu.Unlock()
-        rf.followerChan <- 0
+        rf.convertToFollower()
         return
     }
     rf.persist()
@@ -369,7 +356,6 @@ func (rf *Raft) requestForVotes() {
     
     rf.mu.Lock()
     if rf.state == "Candidate" {
-        rf.resetElectionTime = true
         if meetHigherTerm != -1 {
             rf.currentTerm = meetHigherTerm
         }
@@ -381,14 +367,14 @@ func (rf *Raft) requestForVotes() {
             rf.persist()
             rf.mu.Unlock()
             tmpMutex.Unlock()
-            rf.leaderChan <- 0
+            rf.convertToLeader()
             return
         }else{ //如果遇到 higher term 或者 大多数的reply是false
             DRVPrintf("Server (%d)[state=%s, term=%d, votedFor=%d] finished RequestVote and back to follower", rf.me, rf.state, rf.currentTerm, rf.votedFor)
             rf.persist()
             rf.mu.Unlock()
             tmpMutex.Unlock()
-            rf.followerChan <- 0
+            rf.convertToFollower()
             return
         }
     }
@@ -517,10 +503,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     } 
 
     rf.currentTerm = args.LeaderTerm
-    rf.resetElectionTime = true
     rf.persist()
     rf.mu.Unlock()
-    rf.followerChan <- 0
+    rf.convertToFollower()
     return
 
 }
@@ -539,8 +524,6 @@ func (rf *Raft) sendAppendEntriesToMultipleFollowers() {
     meetHigherTerm := -1
 
     for !rf.killed() {
-        //DAEPrintf("Server (%d) start to send Append Entries", rf.me)
-        
         for i := 0; i < len(rf.peers); i++ {
             if i == rf.me {
                 continue
@@ -604,7 +587,7 @@ func (rf *Raft) sendAppendEntriesToMultipleFollowers() {
             rf.state = "Follower"
             rf.persist()
             rf.mu.Unlock()
-            rf.followerChan <- 0
+            rf.convertToFollower()
             return
         }
 
@@ -689,18 +672,9 @@ func (rf *Raft) convertToFollower() {
     rf.mu.Lock()
     DLCPrintf("Server (%d)[state=%s, term=%d, votedFor=%d] convert to Follower", rf.me, rf.state, rf.currentTerm, rf.votedFor)  
     rf.state = "Follower"
-    // rf.votedFor = -1
     rf.electionTime = generateElectionTime()
-    rf.resetElectionTime = false
+    rf.electionTimer.Reset(time.Duration(rf.electionTime) * time.Millisecond)
     rf.mu.Unlock()
-    for rf.electionTime > 0 && !rf.resetElectionTime {
-        time.Sleep(time.Duration(1) * time.Millisecond)
-        rf.electionTime = rf.electionTime - 1
-    }
-    if !rf.resetElectionTime {
-        //DLCPrintf("Server (%d)[state=%s, term=%d, votedFor=%d, electionTime=%d] wake up", rf.me, rf.state, rf.currentTerm, rf.votedFor, rf.electionTime)
-        rf.candidateChan <- 0       
-    }   
 }
 
 //
@@ -712,29 +686,15 @@ func (rf *Raft) convertToCandidate() {
     rf.state = "Candidate"
     rf.currentTerm++
     rf.votedFor = rf.me
-    rf.resetElectionTime = false
     rf.electionTime = generateElectionTime()
+    rf.electionTimer.Reset(time.Duration(rf.electionTime) * time.Millisecond)
     rf.persist()
     rf.mu.Unlock()
 
     DLCPrintf("Server (%d)[state=%s, term=%d, votedFor=%d， electionTime=%d] start request votes", rf.me, rf.state, rf.currentTerm, rf.votedFor, rf.electionTime)    
     // 启动一个线程, requestVote
     go rf.requestForVotes()
-    
-    // DLCrintf("Server (%d)[state=%s, term=%d, votedFor=%d, electionTime=%d] start to count down", rf.me, rf.state, rf.currentTerm, rf.votedFor, rf.electionTime)
-    for rf.electionTime > 0 && rf.state == "Candidate" && !rf.resetElectionTime{
-        time.Sleep(time.Duration(1) * time.Millisecond)
-        rf.electionTime = rf.electionTime - 1
-    }
 
-    rf.mu.Lock()
-    if rf.electionTime <= 0 && rf.state == "Candidate" {
-        DLCPrintf("Server (%d)[state=%s, term=%d, votedFor=%d, electionTime=%d] election time out and begin a new election round", rf.me, rf.state, rf.currentTerm, rf.votedFor, rf.electionTime)
-        rf.mu.Unlock()
-        rf.candidateChan <- 0
-    }else{
-        rf.mu.Unlock()
-    }
 }
 
 //
@@ -742,7 +702,8 @@ func (rf *Raft) convertToCandidate() {
 //
 func (rf *Raft) convertToLeader() {
     rf.mu.Lock()
-    DLCPrintf("Server (%d)[state=%s, term=%d, votedFor=%d] convert to Leader", rf.me, rf.state, rf.currentTerm, rf.votedFor)    
+    DLCPrintf("Server (%d)[state=%s, term=%d, votedFor=%d] convert to Leader", rf.me, rf.state, rf.currentTerm, rf.votedFor)
+    rf.electionTimer.Stop()    
     rf.state = "Leader"
     for i:=0; i<len(rf.peers); i++ {
         rf.nextIndex[i] = len(rf.log)
@@ -755,30 +716,16 @@ func (rf *Raft) convertToLeader() {
 }
 
 
+
 //
-// Manage Server LifeCycle
-//
-func (rf *Raft) raftServerBeginAdventure() {
-    rf.followerChan = make(chan int, 1)
-    rf.candidateChan = make(chan int, 1)
-    rf.leaderChan = make(chan int, 1)
-
-    rf.followerChan <- 0
-
-    for !rf.killed() {
-        select{
-            case <-rf.followerChan:
-                rf.convertToFollower()
-
-            case <-rf.candidateChan:
-                rf.convertToCandidate()
-
-            case <-rf.leaderChan:
-                rf.convertToLeader()
-        }
+// timer 
+// 
+func (rf *Raft) electionTimeoutListener() {
+    for !rf.killed(){
+         <-rf.electionTimer.C
+            rf.convertToCandidate()
     }
 }
-
 
 
 //
@@ -869,7 +816,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
     // initialize from state persisted before a crash
     rf.readPersist(persister.ReadRaftState())
 
-    go rf.raftServerBeginAdventure()
+    go rf.electionTimeoutListener()
 
     return rf
 }
