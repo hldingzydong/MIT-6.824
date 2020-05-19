@@ -2,9 +2,16 @@ package kvraft
 
 const (
 	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongLeader = "ErrWrongLeader"
+	ErrNoKey       = "ErrNoKey"        // Put()/Append() won't produce this error message
+	ErrWrongLeader = "ErrWrongLeader"  // when timeout also return this message
 )
+
+//
+// error message explain
+// For Get(), may "ErrNoKey"(and return a empty string) "ErrWrongLeader"
+// For Put(), may "ErrWrongLeader", if no key then put, else replace its value
+// For Append(), may "ErrWrongLeader", if no key then act like Put()
+//
 
 type Err string
 
@@ -13,9 +20,8 @@ type PutAppendArgs struct {
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Uuid  int64
+	ClerkId	int64
 }
 
 type PutAppendReply struct {
@@ -24,7 +30,8 @@ type PutAppendReply struct {
 
 type GetArgs struct {
 	Key string
-	// You'll have to add definitions here.
+	Uuid int64
+	ClerkId	int64
 }
 
 type GetReply struct {

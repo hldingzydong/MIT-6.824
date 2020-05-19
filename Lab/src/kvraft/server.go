@@ -7,6 +7,7 @@ import (
 	"../raft"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = 0
@@ -18,32 +19,43 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+const (
+	GET = "GET"
+	PUT = "PUT"
+	APPEND = "APPEND"
+)
+
+type OpType string
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	opType 		OpType
+	opUuid   	int64 
+	key			string
+	value		string
 }
 
 type KVServer struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
-	dead    int32 // set by Kill()
+	mu      		sync.Mutex
+	me      		int
+	rf      		*raft.Raft
+	applyCh 		chan raft.ApplyMsg
+	dead    		int32 // set by Kill()
 
-	maxraftstate int // snapshot if log grows this big
+	maxraftstate 	int // snapshot if log grows this big
 
 	// Your definitions here.
+	lastApplyIdMap	map[int64]int64   // store <clerkId,lastApplyRequestUuid>
+	serverMap		map[string]string // store <key,value>
+	timeoutTimer  	*time.Timer       // for RPC timeout     
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	
 }
 
 //
@@ -59,7 +71,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) Kill() {
 	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
-	// Your code here, if desired.
 }
 
 func (kv *KVServer) killed() bool {
@@ -89,13 +100,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-
-	// You may need initialization code here.
+	kv.lastApplyRequestUuid = -1
+	kv.serverMap = make(map[string]string)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
-	// You may need initialization code here.
+	// set default timeout 200ms
+	kv.timeoutTimer = time.NewTimer(time.Duration(200) * time.Millisecond)
+	
 
 	return kv
 }
