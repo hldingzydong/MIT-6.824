@@ -20,18 +20,18 @@ func nrand() int64 {
 	return x
 }
 
-func DPrintfForPutAppend(key string, value string, op string, serverId int) {
+func DPrintfForPutAppend(key string, value string, op string, clerkId int64, serverId int) {
 	if op == "Put" {
-		DPrintf("Clerk put <%s,%s> into Server[%d]", key, value, serverId)
+		DPrintf("client.go: Clerk[%d] try to put <%s,%s> into Server[%d]", clerkId, key, value, serverId)
 	}else{
-		DPrintf("Clerk append <%s,%s> into Server[%d]", key, value, serverId)
+		DPrintf("client.go: Clerk[%d] try to append <%s,%s> into Server[%d]", clerkId, key, value, serverId)
 	}
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	ck.lastLeaderId = -1
+	ck.lastLeaderId = 0
 	ck.uuidCount = 0
 	ck.clerkId = nrand()
 	return ck
@@ -64,25 +64,26 @@ func (ck *Clerk) Get(key string) string {
 	
 	if lastLeaderId != -1 && lastLeaderId < len(ck.servers) {
 		ok := ck.servers[lastLeaderId].Call("KVServer.Get", &getArgs, &getReply)
-		DPrintf("Cleck get <%s> from Server[%d]", key, lastLeaderId)
-		if ok == nil {
-			if reply.Err == "OK" {
-				return reply.Value
-			} else if reply.Err = "ErrNoKey" {
+		DPrintf("client.go:67: Cleck[%d] try to get <%s> from Server[%d]", ck.clerkId, key, lastLeaderId)
+		if ok {
+			if getReply.Err == "OK" {
+				return getReply.Value
+			} else if getReply.Err == "ErrNoKey" {
 				return ""
 			}
 		}
 	}
 
 	for {
+		var getReply GetReply
 		// choose a random server
-		randomServer := nrand()%len(ck.servers)
-		ok := ck.servers[randomServer].Call("KVServer.Get", &getArgs, &getReply)
-		DPrintf("Cleck get <%s> from Server[%d]", key, randomServer)
-		if ok == nil {
-			if reply.Err == "OK" {
-				return reply.Value
-			} else if reply.Err = "ErrNoKey" {
+		lastLeaderId = (lastLeaderId+1)%len(ck.servers)
+		ok := ck.servers[lastLeaderId].Call("KVServer.Get", &getArgs, &getReply)
+		DPrintf("client.go:82: Cleck[%d] try to get <%s> from Server[%d]", ck.clerkId, key, lastLeaderId)
+		if ok {
+			if getReply.Err == "OK" {
+				return getReply.Value
+			} else if getReply.Err == "ErrNoKey" {
 				return ""
 			}
 		}
@@ -117,8 +118,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	if lastLeaderId != -1 && lastLeaderId < len(ck.servers) {
 		ok := ck.servers[lastLeaderId].Call("KVServer.PutAppend", &putAppendArgs, &putAppendReply)
-		DPrintfForPutAppend(key, value, op, lastLeaderId)
-		if ok == nil {
+		DPrintfForPutAppend(key, value, op, ck.clerkId, lastLeaderId)
+		if ok {
 			if putAppendReply.Err == "OK" {
 				return
 			}
@@ -127,13 +128,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	// execute to this step means last step is not success, so need to try other servers
 	for {
+		var putAppendReply PutAppendReply
 		// choose a random server
-		randomServer := nrand()%len(ck.servers)
+		lastLeaderId = (lastLeaderId+1)%len(ck.servers)
 		ok := ck.servers[lastLeaderId].Call("KVServer.PutAppend", &putAppendArgs, &putAppendReply)
-		DPrintfForPutAppend(key, value, op, randomServer)
-		if ok == nil && putAppendReply.Err == "OK" {
+		DPrintfForPutAppend(key, value, op, ck.clerkId, lastLeaderId)
+		if ok && putAppendReply.Err == "OK" {
 			ck.mu.Lock()
-			ck.lastLeaderId = randomServer
+			ck.lastLeaderId = lastLeaderId
 			ck.mu.Unlock()
 			return
 		}
