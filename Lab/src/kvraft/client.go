@@ -7,9 +7,9 @@ import "sync"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
-	clerkId		int64
 	lastLeaderId int
 	uuidCount int64           // int64 maybe enough to pass the test
+	clerkId		int64
 	mu        sync.Mutex
 }
 
@@ -20,11 +20,11 @@ func nrand() int64 {
 	return x
 }
 
-func DPrintfForPutAppend(key string, value string, op string, clerkId int64, serverId int) {
+func DPrintfForPutAppend(key string, value string, op string, serverId int, uuid int64, clerkId int64) {
 	if op == "Put" {
-		DPrintf("client.go: Clerk[%d] try to put <%s,%s> into Server[%d]", clerkId, key, value, serverId)
+		DPrintf("client.go: Clerk(%d) try to put <%s,%s>(uuid=%d) into Server[%d]", clerkId, key, value, uuid, serverId)
 	}else{
-		DPrintf("client.go: Clerk[%d] try to append <%s,%s> into Server[%d]", clerkId, key, value, serverId)
+		DPrintf("client.go: Clerk(%d) try to append <%s,%s>(uuid=%d) into Server[%d]", clerkId, key, value, uuid, serverId)
 	}
 }
 
@@ -32,7 +32,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	ck.lastLeaderId = 0
-	ck.uuidCount = 0
+	ck.uuidCount = 1
 	ck.clerkId = nrand()
 	return ck
 }
@@ -64,11 +64,11 @@ func (ck *Clerk) Get(key string) string {
 	
 	if lastLeaderId != -1 && lastLeaderId < len(ck.servers) {
 		ok := ck.servers[lastLeaderId].Call("KVServer.Get", &getArgs, &getReply)
-		DPrintf("client.go:67: Cleck[%d] try to get <%s> from Server[%d]", ck.clerkId, key, lastLeaderId)
+		DPrintf("client.go: Cleck(%d) try to get <%s>(uuid=%d) from Server[%d]", getArgs.ClerkId, key, getArgs.Uuid, lastLeaderId)
 		if ok {
-			if getReply.Err == "OK" {
+			if getReply.Err == OK {
 				return getReply.Value
-			} else if getReply.Err == "ErrNoKey" {
+			} else if getReply.Err == ErrNoKey {
 				return ""
 			}
 		}
@@ -79,11 +79,11 @@ func (ck *Clerk) Get(key string) string {
 		// choose a random server
 		lastLeaderId = (lastLeaderId+1)%len(ck.servers)
 		ok := ck.servers[lastLeaderId].Call("KVServer.Get", &getArgs, &getReply)
-		DPrintf("client.go:82: Cleck[%d] try to get <%s> from Server[%d]", ck.clerkId, key, lastLeaderId)
+		DPrintf("client.go: Cleck(%d) try to get <%s>(uuid=%d) from Server[%d]", getArgs.ClerkId, key, getArgs.Uuid, lastLeaderId)
 		if ok {
-			if getReply.Err == "OK" {
+			if getReply.Err == OK {
 				return getReply.Value
-			} else if getReply.Err == "ErrNoKey" {
+			} else if getReply.Err == ErrNoKey {
 				return ""
 			}
 		}
@@ -118,11 +118,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	if lastLeaderId != -1 && lastLeaderId < len(ck.servers) {
 		ok := ck.servers[lastLeaderId].Call("KVServer.PutAppend", &putAppendArgs, &putAppendReply)
-		DPrintfForPutAppend(key, value, op, ck.clerkId, lastLeaderId)
-		if ok {
-			if putAppendReply.Err == "OK" {
-				return
-			}
+		DPrintfForPutAppend(key, value, op, lastLeaderId, putAppendArgs.Uuid, putAppendArgs.ClerkId)
+		if ok && putAppendReply.Err == OK {
+			return
 		}
 	}
 
@@ -132,8 +130,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		// choose a random server
 		lastLeaderId = (lastLeaderId+1)%len(ck.servers)
 		ok := ck.servers[lastLeaderId].Call("KVServer.PutAppend", &putAppendArgs, &putAppendReply)
-		DPrintfForPutAppend(key, value, op, ck.clerkId, lastLeaderId)
-		if ok && putAppendReply.Err == "OK" {
+		DPrintfForPutAppend(key, value, op, lastLeaderId, putAppendArgs.Uuid, putAppendArgs.ClerkId)
+		if ok && putAppendReply.Err == OK {
 			ck.mu.Lock()
 			ck.lastLeaderId = lastLeaderId
 			ck.mu.Unlock()
