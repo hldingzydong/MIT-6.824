@@ -4,6 +4,7 @@ import "../labrpc"
 import "crypto/rand"
 import "math/big"
 import "sync"
+import "log"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -20,11 +21,20 @@ func nrand() int64 {
 	return x
 }
 
+const CDebug = 0
+
+func CDPrintf(format string, a ...interface{}) (n int, err error) {
+	if CDebug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
+
 func DPrintfForPutAppend(key string, value string, op string, serverId int, uuid int64, clerkId int64) {
 	if op == "Put" {
-		DPrintf("client.go: Clerk(%d) try to put <%s,%s>(uuid=%d) into Server[%d]", clerkId, key, value, uuid, serverId)
+		CDPrintf("client.go: Clerk(%d) try to put <%s,%s>(uuid=%d) into Server[%d]", clerkId, key, value, uuid, serverId)
 	}else{
-		DPrintf("client.go: Clerk(%d) try to append <%s,%s>(uuid=%d) into Server[%d]", clerkId, key, value, uuid, serverId)
+		CDPrintf("client.go: Clerk(%d) try to append <%s,%s>(uuid=%d) into Server[%d]", clerkId, key, value, uuid, serverId)
 	}
 }
 
@@ -64,11 +74,13 @@ func (ck *Clerk) Get(key string) string {
 	
 	if lastLeaderId != -1 && lastLeaderId < len(ck.servers) {
 		ok := ck.servers[lastLeaderId].Call("KVServer.Get", &getArgs, &getReply)
-		DPrintf("client.go: Cleck(%d) try to get <%s>(uuid=%d) from Server[%d]", getArgs.ClerkId, key, getArgs.Uuid, lastLeaderId)
+		CDPrintf("client.go: Clerk(%d) try to get <%s>(uuid=%d) from Server[%d]", getArgs.ClerkId, key, getArgs.Uuid, lastLeaderId)
 		if ok {
 			if getReply.Err == OK {
+				CDPrintf("client.go: Clerk(%d) receive GetRPC reply(OK) <%v,%v>(uuid=%d) from Server[%d]", getArgs.ClerkId, key, getReply.Value, getArgs.Uuid, lastLeaderId)
 				return getReply.Value
 			} else if getReply.Err == ErrNoKey {
+				CDPrintf("client.go: Clerk(%d) receive GetRPC reply(ErrNoKey) <%v>(uuid=%d) from Server[%d]", getArgs.ClerkId, key, getArgs.Uuid, lastLeaderId)
 				return ""
 			}
 		}
@@ -79,11 +91,13 @@ func (ck *Clerk) Get(key string) string {
 		// choose a random server
 		lastLeaderId = (lastLeaderId+1)%len(ck.servers)
 		ok := ck.servers[lastLeaderId].Call("KVServer.Get", &getArgs, &getReply)
-		DPrintf("client.go: Cleck(%d) try to get <%s>(uuid=%d) from Server[%d]", getArgs.ClerkId, key, getArgs.Uuid, lastLeaderId)
+		CDPrintf("client.go: Clerk(%d) try to get <%s>(uuid=%d) from Server[%d]", getArgs.ClerkId, key, getArgs.Uuid, lastLeaderId)
 		if ok {
 			if getReply.Err == OK {
+				CDPrintf("client.go: Clerk(%d) receive GetRPC reply(OK) <%v,%v>(uuid=%d) from Server[%d]", getArgs.ClerkId, key, getReply.Value, getArgs.Uuid, lastLeaderId)
 				return getReply.Value
 			} else if getReply.Err == ErrNoKey {
+				CDPrintf("client.go: Clerk(%d) receive GetRPC reply(ErrNoKey) <%v>(uuid=%d) from Server[%d]", getArgs.ClerkId, key, getArgs.Uuid, lastLeaderId)
 				return ""
 			}
 		}
@@ -118,8 +132,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	if lastLeaderId != -1 && lastLeaderId < len(ck.servers) {
 		ok := ck.servers[lastLeaderId].Call("KVServer.PutAppend", &putAppendArgs, &putAppendReply)
-		DPrintfForPutAppend(key, value, op, lastLeaderId, putAppendArgs.Uuid, putAppendArgs.ClerkId)
+		//DPrintfForPutAppend(key, value, op, lastLeaderId, putAppendArgs.Uuid, putAppendArgs.ClerkId)
 		if ok && putAppendReply.Err == OK {
+			CDPrintf("client.go: Clerk(%d) receive PutAppendRPC reply(OK) <%v,%v>(uuid=%d) from Server[%d]", putAppendArgs.ClerkId, key, value, putAppendArgs.Uuid, lastLeaderId)
 			return
 		}
 	}
@@ -130,8 +145,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		// choose a random server
 		lastLeaderId = (lastLeaderId+1)%len(ck.servers)
 		ok := ck.servers[lastLeaderId].Call("KVServer.PutAppend", &putAppendArgs, &putAppendReply)
-		DPrintfForPutAppend(key, value, op, lastLeaderId, putAppendArgs.Uuid, putAppendArgs.ClerkId)
+		//DPrintfForPutAppend(key, value, op, lastLeaderId, putAppendArgs.Uuid, putAppendArgs.ClerkId)
 		if ok && putAppendReply.Err == OK {
+			CDPrintf("client.go: Clerk(%d) receive PutAppendRPC reply(OK) <%v,%v>(uuid=%d) from Server[%d]", putAppendArgs.ClerkId, key, value, putAppendArgs.Uuid, lastLeaderId)
 			ck.mu.Lock()
 			ck.lastLeaderId = lastLeaderId
 			ck.mu.Unlock()

@@ -24,7 +24,7 @@ import "math/rand"
 import "time"
 import "bytes"
 import "../labgob"
-
+// import "fmt"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -648,6 +648,7 @@ func (rf *Raft) commitEntries() {
         }
         DAEPrintf("Server (%d)[state=%s, term=%d, votedFor=%d] apply message from index=%d to index=%d to applyCh", 
             rf.me, rf.state, rf.currentTerm, rf.votedFor, rf.commitIndex, i-1)
+        
         rf.commitIndex = i-1
         rf.lastApplied = rf.commitIndex
     }
@@ -656,6 +657,7 @@ func (rf *Raft) commitEntries() {
     if applyMsgArray != nil && len(applyMsgArray) > 0 {
         go func(){
             for _, applyMsg := range applyMsgArray {
+                //fmt.Printf("Server[%d] apply message to applyCh\n", rf.me)
                 rf.applyCh <- applyMsg
             }
         }()

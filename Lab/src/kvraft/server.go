@@ -50,7 +50,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	op.OpType = "Get"
 	op.Key = args.Key
 
+	kv.mu.Lock()
 	_, _, isLeader := kv.rf.Start(op)
+	kv.mu.Unlock()
+
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -60,7 +63,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		requestUuid := strconv.FormatInt(args.ClerkId,10) + strconv.FormatInt(args.Uuid,10)
 
 		kv.mu.Lock()
-		kv.clerkChannelMap[requestUuid] = make(chan Op)
+		kv.clerkChannelMap[requestUuid] = make(chan Op, 1)
 		tmpChan := kv.clerkChannelMap[requestUuid]
 		kv.mu.Unlock()
 
@@ -68,18 +71,18 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		select {
 			case <-timeoutTimer.C:
 				reply.Err = ErrWrongLeader
-				DPrintf("server.go: Leader[%d] timeout aftre receiving Get RPC from Clerk[%d](args.Uuid=%d, args.Key=%s)", kv.me, args.ClerkId, args.Uuid, args.Key)
+				CDPrintf("server.go: Leader[%d] timeout aftre receiving Get RPC from Clerk[%d](args.Uuid=%d, args.Key=%s)", kv.me, args.ClerkId, args.Uuid, args.Key)
 
 				kv.mu.Lock()
 				delete(kv.clerkChannelMap, requestUuid)
 				kv.mu.Unlock()
 				return
 
-			case <- tmpChan:
+			case <-tmpChan:
 				kv.mu.Lock()
 				defer kv.mu.Unlock()
 
-				DPrintf("server.go: Leader[%d] respond to Get RPC from Clerk[%d](args.Uuid=%d, args.Key=%s)", kv.me, args.ClerkId, args.Uuid, args.Key)
+				CDPrintf("server.go: Leader[%d] respond to Get RPC from Clerk[%d](args.Uuid=%d, args.Key=%s)", kv.me, args.ClerkId, args.Uuid, args.Key)
 				lastValue, ok := kv.serverMap[op.Key]
 				if ok {
 					reply.Err = OK
@@ -101,18 +104,20 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	op.Key = args.Key 
 	op.Value = args.Value 
 
+	kv.mu.Lock()
 	_, _, isLeader := kv.rf.Start(op)
-	if !isLeader {
-		reply.Err = "ErrWrongLeader"
-		return
+	kv.mu.Unlock()
 
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
 	}else{
 		DPrintf("server.go: Leader[%d] receive PutAppend RPC from Clerk[%d](args.Uuid=%d, args.Key=%s, args.Value=%s)", kv.me, args.ClerkId, args.Uuid, args.Key, args.Value)
 		// 该Server是leader
 		requestUuid := strconv.FormatInt(args.ClerkId,10) + strconv.FormatInt(args.Uuid,10)
 
 		kv.mu.Lock()
-		kv.clerkChannelMap[requestUuid] = make(chan Op)
+		kv.clerkChannelMap[requestUuid] = make(chan Op, 1)
 		tmpChan := kv.clerkChannelMap[requestUuid]
 		kv.mu.Unlock()
 		
@@ -128,7 +133,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 				kv.mu.Unlock()
 				return
 
-			case <- tmpChan:
+			case <-tmpChan:
 				kv.mu.Lock()
 				defer kv.mu.Unlock()
 
@@ -146,7 +151,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) DaemonThread() {
 	for !kv.killed() {
 		applyMsg := <- kv.applyCh
-		DPrintf("server.go: Server[%d] read an applyMsg[%v] from its applyCh", kv.me, applyMsg)
+		CDPrintf("server.go: Server[%d] read an applyMsg[%v] from its applyCh", kv.me, applyMsg)
 		if !applyMsg.CommandValid {
 			continue
 		}else{
@@ -165,7 +170,7 @@ func (kv *KVServer) DaemonThread() {
 					 
 				if getOp.OpType == "Put" {
 					kv.serverMap[getOp.Key] = getOp.Value
-				}else{
+				}else if getOp.OpType == "Append" {
 					lastValue, ok := kv.serverMap[getOp.Key]
 					if ok {
 						kv.serverMap[getOp.Key] = lastValue + getOp.Value
@@ -173,11 +178,11 @@ func (kv *KVServer) DaemonThread() {
 						kv.serverMap[getOp.Key] = getOp.Value
 					}
 				}
-
-				clerkChan, ok := kv.clerkChannelMap[requestUuid]
-				if ok {
-					clerkChan <- getOp
-				}
+			}
+				
+			clerkChan, ok := kv.clerkChannelMap[requestUuid]
+			if ok {
+				clerkChan <- getOp
 			}
 			kv.mu.Unlock()
 		}
