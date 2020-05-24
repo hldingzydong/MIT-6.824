@@ -95,6 +95,9 @@ func (ck *Clerk) Get(key string) string {
 		if ok {
 			if getReply.Err == OK {
 				CDPrintf("client.go: Clerk(%d) receive GetRPC reply(OK) <%v,%v>(uuid=%d) from Server[%d]", getArgs.ClerkId, key, getReply.Value, getArgs.Uuid, lastLeaderId)
+				ck.mu.Lock()
+				ck.lastLeaderId = lastLeaderId
+				ck.mu.Unlock()
 				return getReply.Value
 			} else if getReply.Err == ErrNoKey {
 				CDPrintf("client.go: Clerk(%d) receive GetRPC reply(ErrNoKey) <%v>(uuid=%d) from Server[%d]", getArgs.ClerkId, key, getArgs.Uuid, lastLeaderId)

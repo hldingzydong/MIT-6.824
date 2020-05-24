@@ -67,13 +67,18 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		tmpChan := kv.clerkChannelMap[requestUuid]
 		kv.mu.Unlock()
 
-		timeoutTimer := time.NewTimer(time.Duration(1000) * time.Millisecond)
+		timeoutTimer := time.NewTimer(time.Duration(500) * time.Millisecond)
 		select {
 			case <-timeoutTimer.C:
-				reply.Err = ErrWrongLeader
-				CDPrintf("server.go: Leader[%d] timeout aftre receiving Get RPC from Clerk[%d](args.Uuid=%d, args.Key=%s)", kv.me, args.ClerkId, args.Uuid, args.Key)
-
 				kv.mu.Lock()
+				DPrintf("server.go: Leader[%d] timeout aftre receiving Get RPC from Clerk[%d](args.Uuid=%d, args.Key=%s)", kv.me, args.ClerkId, args.Uuid, args.Key)
+				if kv.isDuplicate(args.ClerkId, args.Uuid) {
+					reply.Err = OK
+					reply.Value = kv.serverMap[op.Key]
+				}else{
+					reply.Err = ErrWrongLeader
+				}
+				
 				delete(kv.clerkChannelMap, requestUuid)
 				kv.mu.Unlock()
 				return
@@ -82,7 +87,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 				kv.mu.Lock()
 				defer kv.mu.Unlock()
 
-				CDPrintf("server.go: Leader[%d] respond to Get RPC from Clerk[%d](args.Uuid=%d, args.Key=%s)", kv.me, args.ClerkId, args.Uuid, args.Key)
+				DPrintf("server.go: Leader[%d] respond to Get RPC from Clerk[%d](args.Uuid=%d, args.Key=%s)", kv.me, args.ClerkId, args.Uuid, args.Key)
 				lastValue, ok := kv.serverMap[op.Key]
 				if ok {
 					reply.Err = OK
@@ -122,13 +127,20 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		
 		// 定义一个倒计时器,当倒计时到达时若还未从applyCh拿到response则reply ”ErrWrongLeader"
-		timeoutTimer := time.NewTimer(time.Duration(1000) * time.Millisecond)
+		timeoutTimer := time.NewTimer(time.Duration(500) * time.Millisecond)
 		select {
 			case <-timeoutTimer.C:
-				reply.Err = ErrWrongLeader
+
+				kv.mu.Lock()
 				DPrintf("server.go: Leader[%d] timeout aftre receiving PutAppend RPC from Clerk[%d](args.Uuid=%d, args.Key=%s, args.Value=%s))", 
 					kv.me, args.ClerkId, args.Uuid, args.Key, args.Value)
-				kv.mu.Lock()
+
+				if kv.isDuplicate(op.OpClerkId, op.OpUuid) {
+					reply.Err = OK
+				}else{
+					reply.Err = ErrWrongLeader
+				}
+				
 				delete(kv.clerkChannelMap, requestUuid)
 				kv.mu.Unlock()
 				return
@@ -147,11 +159,20 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
+func (kv *KVServer) isDuplicate(clerkId int64, uuid int64) bool {
+	lastRequestUuid, ok := kv.lastApplyIdMap[clerkId]
+	if !ok || lastRequestUuid < uuid {
+		return false
+	}
+	return true
+}
+
+
 
 func (kv *KVServer) DaemonThread() {
 	for !kv.killed() {
 		applyMsg := <- kv.applyCh
-		CDPrintf("server.go: Server[%d] read an applyMsg[%v] from its applyCh", kv.me, applyMsg)
+		DPrintf("server.go: Server[%d] read an applyMsg[%v] from its applyCh", kv.me, applyMsg)
 		if !applyMsg.CommandValid {
 			continue
 		}else{
@@ -163,8 +184,7 @@ func (kv *KVServer) DaemonThread() {
 
 			// 如果该次applyMsg所对应的request已经apply 过一次,则不会再apply了
 			kv.mu.Lock()
-			lastUuid, ok := kv.lastApplyIdMap[clerkId]
-			if !ok || lastUuid < uuid {
+			if !kv.isDuplicate(clerkId, uuid) {
 				DPrintf("server.go: Server[%d] get applyMsg from Clerk[%d](Uuid=%d)", kv.me, clerkId, uuid)
 				kv.lastApplyIdMap[clerkId] = uuid
 					 
@@ -178,6 +198,9 @@ func (kv *KVServer) DaemonThread() {
 						kv.serverMap[getOp.Key] = getOp.Value
 					}
 				}
+			}else{
+				kv.mu.Unlock()
+				continue
 			}
 				
 			clerkChan, ok := kv.clerkChannelMap[requestUuid]
