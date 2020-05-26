@@ -9,9 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 	"strconv"
+	"bytes"
 )
 
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -40,9 +41,15 @@ type KVServer struct {
 	lastApplyIdMap	map[int64]int64   // store <clerkId,lastApplyRequestUuid>
 	clerkChannelMap map[string]chan Op // store <clerkId+uuid, clerkNotifyChannel>
 	serverMap		map[string]string // store <key,value>   
+
+	persister 		*raft.Persister          // Object to hold this peer's persisted state
+	lastLogIndex    int
 }
 
 
+//
+// Get RPC handler
+//
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	var op Op
 	op.OpUuid = args.Uuid
@@ -101,6 +108,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 }
 
+//
+// PutAppend RPC handler
+//
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	var op Op
 	op.OpUuid = args.Uuid
@@ -159,6 +169,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
+
+//
+// if the request is ever applied
+//
 func (kv *KVServer) isDuplicate(clerkId int64, uuid int64) bool {
 	lastRequestUuid, ok := kv.lastApplyIdMap[clerkId]
 	if !ok || lastRequestUuid < uuid {
@@ -168,22 +182,38 @@ func (kv *KVServer) isDuplicate(clerkId int64, uuid int64) bool {
 }
 
 
-
+//
+// backup thread for a kv server
+// read apply message from applyCh and update its <k,v>
+// and notify RPC handler reply to clerks
+//
 func (kv *KVServer) DaemonThread() {
 	for !kv.killed() {
 		applyMsg := <- kv.applyCh
 		DPrintf("server.go: Server[%d] read an applyMsg[%v] from its applyCh", kv.me, applyMsg)
 		if !applyMsg.CommandValid {
-			continue
+			// this is a snapshot
+			DPrintf("server.go: Server[%d] get snapshot from its Raft", kv.me)
+			snapshot := applyMsg.CommandSnapshot
+			kv.mu.Lock()
+			kv.serverMap = snapshot.ServerMap
+			kv.lastApplyIdMap = snapshot.LastApplyIdMap
+			kv.lastLogIndex = 0
+			kv.mu.Unlock()
 		}else{
 			getOp := applyMsg.Command.(Op)
-			
+			getIndex := applyMsg.CommandIndex
+
 			clerkId := getOp.OpClerkId
 			uuid := getOp.OpUuid
 			requestUuid := strconv.FormatInt(clerkId,10) + strconv.FormatInt(uuid,10)
 
 			// 如果该次applyMsg所对应的request已经apply 过一次,则不会再apply了
 			kv.mu.Lock()
+			if getIndex > kv.lastLogIndex {
+				kv.lastLogIndex = getIndex
+			}
+
 			if !kv.isDuplicate(clerkId, uuid) {
 				DPrintf("server.go: Server[%d] get applyMsg from Clerk[%d](Uuid=%d)", kv.me, clerkId, uuid)
 				kv.lastApplyIdMap[clerkId] = uuid
@@ -209,6 +239,44 @@ func (kv *KVServer) DaemonThread() {
 			}
 			kv.mu.Unlock()
 		}
+	}
+}
+
+
+//
+// when kv.maxraftstate > -1, it means that the kv server needs snapshot
+// then it needs to a backup thread to periodically check if need to 
+// take a snapshot now and tell raft
+//
+func (kv *KVServer) SnapshotDetectThread() {
+	// bound condition
+	maxRaftPersistSize := kv.maxraftstate * 3 / 2
+	DPrintf("server.go: Server(%d)'s max raft persiste size is %d", kv.me, maxRaftPersistSize)
+	for !kv.killed() {
+		// every 100 ms check if need to take a snapshot
+		time.Sleep(100 * time.Millisecond)
+		
+		kv.mu.Lock()
+		raftSize := kv.persister.RaftStateSize()
+		if raftSize > maxRaftPersistSize {
+			var snapshot raft.Snapshot
+			snapshot.ServerMap = make(map[string]string)
+			for k,v := range kv.serverMap {
+				snapshot.ServerMap[k] = v
+			}
+
+			snapshot.LastApplyIdMap = make(map[int64]int64)
+			for k,v := range kv.lastApplyIdMap {
+				snapshot.LastApplyIdMap[k] = v
+			}
+
+			snapshot.LastLogIndex = kv.lastLogIndex
+			//kv.lastLogIndex = 0
+
+			kv.rf.StartSnapshot(snapshot)
+			DPrintf("server.go: Wow!!! current raft persist size is %d, Server(%d) take a snapshot and notify its raft", raftSize, kv.me)
+		}
+		kv.mu.Unlock()
 	}
 }
 
@@ -255,15 +323,37 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	kv.persister = persister
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
-	kv.lastApplyIdMap = make(map[int64]int64)
-	kv.serverMap = make(map[string]string)
 	kv.clerkChannelMap = make(map[string]chan Op)
 
+	// read persister‘s current snapshot
+	snapshotInBytes := kv.persister.ReadSnapshot()
+	if len(snapshotInBytes) > 0 {
+		DPrintf("server.go: Server(%d) read snapshot from its persister", kv.me)
+		r := bytes.NewBuffer(snapshotInBytes)
+    	d := labgob.NewDecoder(r)
+    	var snapshot raft.Snapshot
+    	if d.Decode(&snapshot) != nil {
+        	DPrintf("read snapshot error")
+        	return nil
+    	}
+    	kv.lastApplyIdMap = snapshot.LastApplyIdMap
+    	kv.serverMap = snapshot.ServerMap
+    	kv.lastLogIndex = snapshot.LastLogIndex
+	}else{
+		kv.lastApplyIdMap = make(map[int64]int64)
+		kv.serverMap = make(map[string]string)
+		kv.lastLogIndex = 0
+	}
+
 	go kv.DaemonThread()
+
+	if kv.maxraftstate > -1 {
+		go kv.SnapshotDetectThread()
+	}
 
 	return kv
 }

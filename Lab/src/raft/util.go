@@ -7,7 +7,9 @@ import "log"
 const DebugForLifeCycle = 0
 const DebugForRequestVote = 0
 const DebugForAppendEntry = 0
+const DebugForInstallSnapshot = 1
 const DebugErr = 0
+
 
 func DLCPrintf(format string, a ...interface{}) (n int, err error) {
 	if DebugForLifeCycle > 0 {
@@ -25,6 +27,13 @@ func DRVPrintf(format string, a ...interface{}) (n int, err error) {
 
 func DAEPrintf(format string, a ...interface{}) (n int, err error) {
 	if DebugForAppendEntry > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
+
+func DISPrintf(format string, a ...interface{}) (n int, err error) {
+	if DebugForInstallSnapshot > 0 {
 		log.Printf(format, a...)
 	}
 	return

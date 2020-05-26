@@ -1,5 +1,5 @@
 #!/bin/sh
-cd /Users/maxie/MIT-6.824/Lab/src/kvraft
+cd /Users/maxie/MIT-6.824/Lab/src/raft
 clear
 go build
 if [ "$?" == 0 ]; then
