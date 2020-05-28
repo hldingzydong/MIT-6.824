@@ -264,10 +264,11 @@ func (rf *Raft) StartSnapshot(snapshot Snapshot) {
         rf.snapshottedIndex = snapshot.LastLogIndex
 
         rf.persistWithSnapshot(snapshot)
-
+/*
         if rf.state == "Leader" {
             go rf.sendInstallSnapshotToMultipleFollowers(snapshot.LastLogIndex, lastIncludedTerm)
         }
+*/
     }
     return
 }
@@ -774,6 +775,8 @@ func (rf *Raft) startAppendEntries() {
             }
         }
     }
+
+    rf.commitEntries()
 }
 
 /***************************************************************************
@@ -865,20 +868,22 @@ func (rf *Raft) sendInstallSnapshotToOneFollower(followerId int, lastIncludedTer
     rf.mu.Unlock()
 
     ok := rf.sendInstallSnapshot(followerId, &installSnapshotArgs, &installSnapshotReply)
-    if ok {
+    rf.mu.Lock()
+    if ok && rf.currentTerm == installSnapshotArgs.LeaderTerm {
         if installSnapshotReply.FollowerTerm > rf.currentTerm {
             rf.currentTerm = installSnapshotReply.FollowerTerm
+            rf.mu.Unlock()
             rf.convertToFollower()
+            return
         }else{
-            rf.mu.Lock()
             if rf.matchIndex[followerId] < installSnapshotArgs.LastIncludedIndex {
                 rf.matchIndex[followerId] = installSnapshotArgs.LastIncludedIndex
             }
             DISPrintf("Leader(%d) update rf.nextIndex[%d] from %d to %d", rf.me, followerId, rf.nextIndex[followerId], rf.matchIndex[followerId] + 1)
-            rf.nextIndex[followerId] = rf.matchIndex[followerId] + 1
-            rf.mu.Unlock()
+            rf.nextIndex[followerId] = rf.matchIndex[followerId] + 1 
         }
     }
+    rf.mu.Unlock()
 }
 
 func (rf *Raft) sendInstallSnapshotToMultipleFollowers(lastIncludedIndex int, lastIncludedTerm int) {
