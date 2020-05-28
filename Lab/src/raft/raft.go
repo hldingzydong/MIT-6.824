@@ -59,7 +59,7 @@ const(
 type Snapshot struct {
     ServerMap       map[string]string // store <key,value>
     LastApplyIdMap  map[int64]int64   // store <clerkId,lastApplyRequestUuid>
-    LastLogIndex        int               // the last applied log's index
+    LastLogIndex        int               // the last applied log's index, view from kv server 
 }
 
 /*
@@ -101,21 +101,24 @@ type Raft struct {
     log         []Entry           // log entries
 
     // volatile filed
-    commitIndex int 
-    lastApplied int
+    commitIndex int               // global view
+    lastApplied int               // global view
 
     // election time
     electionTime int              // election time
 
     // leader's field
-    nextIndex   []int
-    matchIndex  []int
+    nextIndex   []int             // global view
+    matchIndex  []int             // global view
 
     // timer
     electionTimer  *time.Timer
 
     // apply channel 
     applyCh         chan ApplyMsg
+
+    // for snapshot
+    snapshottedIndex       int    // global view
 }
 
 
@@ -145,6 +148,8 @@ func (rf *Raft) initRaftNodeToFollower(logCapacity int) {
         rf.nextIndex[i] = len(rf.log)
         rf.matchIndex[i] = 0
     }
+
+    rf.snapshottedIndex = 0
 }
 
 //
@@ -179,6 +184,7 @@ func (rf *Raft) persist() {
     e.Encode(rf.currentTerm)
     e.Encode(rf.votedFor)
     e.Encode(rf.log)
+    e.Encode(rf.snapshottedIndex)
     data := w.Bytes()
     rf.persister.SaveRaftState(data)
 }
@@ -196,6 +202,7 @@ func (rf *Raft) readPersist(data []byte) {
     var currentTerm int
     var votedFor    int
     var log         []Entry
+    var snapshottedIndex int
 
     if d.Decode(&currentTerm) != nil {
         DErrPrintf("read currentTerm error")
@@ -210,10 +217,36 @@ func (rf *Raft) readPersist(data []byte) {
         return
     }
 
+    if d.Decode(&snapshottedIndex) != nil {
+        DErrPrintf("read snapshottedIndex error")
+        return
+    }
+
     rf.currentTerm = currentTerm
     rf.votedFor = votedFor
     rf.log = log
+    rf.snapshottedIndex = snapshottedIndex
+    rf.commitIndex = snapshottedIndex
+    rf.lastApplied = snapshottedIndex
     DLCPrintf("Read Server(%d) state(currentTerm=%d, votedFor=%d, logLength=%d) from persister done", rf.me, rf.currentTerm, rf.votedFor, len(rf.log))
+}
+
+
+func (rf *Raft) persistWithSnapshot(snapshot Snapshot) {
+    w1 := new(bytes.Buffer)
+    e1 := labgob.NewEncoder(w1)
+    e1.Encode(rf.currentTerm)
+    e1.Encode(rf.votedFor)
+    e1.Encode(rf.log)
+    e1.Encode(rf.snapshottedIndex)
+    stateInBytes := w1.Bytes()
+
+    w2 := new(bytes.Buffer)
+    e2 := labgob.NewEncoder(w2)
+    e2.Encode(snapshot)
+    snapshotInBytes := w2.Bytes()
+
+    rf.persister.SaveStateAndSnapshot(stateInBytes, snapshotInBytes)
 }
 
 
@@ -224,28 +257,17 @@ func (rf *Raft) StartSnapshot(snapshot Snapshot) {
     rf.mu.Lock()
     defer rf.mu.Unlock()
 
-    lastIncludedTerm := rf.log[snapshot.LastLogIndex].Term
-    rf.cutoffLogBeforeIndex(snapshot.LastLogIndex)
+    lastLogIndexInLogView := rf.convertToRaftLogViewIndex(snapshot.LastLogIndex)
+    if lastLogIndexInLogView > 0 && lastLogIndexInLogView < len(rf.log) {
+        lastIncludedTerm := rf.log[lastLogIndexInLogView].Term
+        rf.cutoffLogBeforeIndex(lastLogIndexInLogView, lastIncludedTerm)
+        rf.snapshottedIndex = snapshot.LastLogIndex
 
-    w1 := new(bytes.Buffer)
-    e1 := labgob.NewEncoder(w1)
-    e1.Encode(rf.currentTerm)
-    e1.Encode(rf.votedFor)
-    e1.Encode(rf.log)
-    stateInBytes := w1.Bytes()
+        rf.persistWithSnapshot(snapshot)
 
-    w2 := new(bytes.Buffer)
-    e2 := labgob.NewEncoder(w2)
-    e2.Encode(snapshot)
-    // e2.Encode(snapshot.ServerMap)
-    // e2.Encode(snapshot.LastApplyIdMap)
-    // e2.Encode(snapshot.LastLogIndex)
-    snapshotInBytes := w2.Bytes()
-
-    rf.persister.SaveStateAndSnapshot(stateInBytes, snapshotInBytes)
-
-    if rf.state == "Leader" {
-        go rf.sendInstallSnapshotToMultipleFollowers(snapshot, lastIncludedTerm)
+        if rf.state == "Leader" {
+            go rf.sendInstallSnapshotToMultipleFollowers(snapshot.LastLogIndex, lastIncludedTerm)
+        }
     }
     return
 }
@@ -291,8 +313,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
     // 但是不结束, 因为有可能遇到比自己term更高的RPC, 需要更新自己当前状态
     reply.FollowerTerm = args.CandidateTerm
 
-    lastLogIndex := len(rf.log) - 1
-    lastLogTerm := rf.log[lastLogIndex].Term
+    lastLogIndex := rf.convertToGlobalViewIndex(len(rf.log) - 1)
+    lastLogTerm := rf.log[len(rf.log)-1].Term
     if args.LastLogTerm < lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex < lastLogIndex) {
         reply.VotedGranted = false
     }else{
@@ -374,8 +396,8 @@ func (rf *Raft) requestForVotes() {
                 rf.mu.Lock()
                 args.CandidateTerm = rf.currentTerm
                 args.CandidateId = rf.me
-                args.LastLogIndex = len(rf.log)-1
-                args.LastLogTerm = rf.log[args.LastLogIndex].Term
+                args.LastLogIndex = rf.convertToGlobalViewIndex(len(rf.log)-1)
+                args.LastLogTerm = rf.log[len(rf.log)-1].Term
                 rf.mu.Unlock()
 
                 vote := rf.sendRequestVote(follower, &args, &reply)
@@ -461,7 +483,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     rf.mu.Lock()
 
     if len(args.Entries) != 0 {
-        DAEPrintf("Server (%d)[term=%d] received Append Entries request[LeaderTerm=%d] from Server (%d)", rf.me, rf.currentTerm, args.LeaderTerm, args.LeaderId)
+        DAEPrintf("Server (%d)[term=%d] received Append Entries request[LeaderTerm=%d, PrevLogIndex=%d] from Server (%d)", rf.me, rf.currentTerm, args.LeaderTerm, args.PrevLogIndex, args.LeaderId)
     }else{
         DAEPrintf("Server (%d) received Heart Beat request from Server (%d)", rf.me, args.LeaderId)
     }
@@ -473,26 +495,43 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         return
     }
 
+    argsPrevLogIndexInLogView := rf.convertToRaftLogViewIndex(args.PrevLogIndex)
+
+    if argsPrevLogIndexInLogView < 0 {
+        reply.IsSuccess = true
+
+        // sync log if needed
+        if args.PrevLogIndex + len(args.Entries) > rf.snapshottedIndex {
+            // if snapshottedIndex == prevLogIndex, all log entries should be added.
+            startIdx := rf.snapshottedIndex - args.PrevLogIndex
+            // only keep the last snapshotted one
+            rf.log = rf.log[:1]
+            rf.log = append(rf.log, args.Entries[startIdx:]...)
+        }
+        rf.mu.Unlock()
+        return
+    }
+
     // 如果PrevLogIndex在log中不存在
-    if len(rf.log) <= args.PrevLogIndex {
+    if len(rf.log) <= argsPrevLogIndexInLogView{
         reply.IsSuccess = false
         reply.FollowerTerm = args.LeaderTerm
         reply.ConflictTerm = -1
-        reply.ConflictIndex = len(rf.log)
+        reply.ConflictIndex = rf.convertToGlobalViewIndex(len(rf.log))
     }else { 
         // 如果存在, 则比较PrevLogTerm
-        lastTerm := rf.log[args.PrevLogIndex].Term
+        lastTerm := rf.log[argsPrevLogIndexInLogView].Term
         if lastTerm != args.PrevLogTerm {
             reply.IsSuccess = false
             reply.FollowerTerm = args.LeaderTerm
             reply.ConflictTerm = lastTerm
 
             // 找到该Term中的第一个index
-            i := args.PrevLogIndex
+            i := argsPrevLogIndexInLogView
             for i>=1 && rf.log[i].Term == lastTerm{
-                i--
+                i-- 
             }
-            reply.ConflictIndex = i+1
+            reply.ConflictIndex = rf.convertToGlobalViewIndex(i+1)
         }else{
             // 可以进行Append Entries
             reply.IsSuccess = true
@@ -503,7 +542,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
                 // 先找到 conflict entry 的index
                 unmatch_idx := -1
                 for idx := range args.Entries {
-                    if len(rf.log) < (args.PrevLogIndex+2+idx) || rf.log[(args.PrevLogIndex+1+idx)].Term != args.Entries[idx].Term {
+                    if len(rf.log) < (argsPrevLogIndexInLogView+2+idx) || rf.log[(argsPrevLogIndexInLogView+1+idx)].Term != args.Entries[idx].Term {
                         // unmatch log found
                         unmatch_idx = idx
                         break
@@ -513,38 +552,41 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
                 if unmatch_idx != -1 {
                     // there are unmatch entries
                     // truncate unmatch Follower entries, and apply Leader entries
-                    rf.log = rf.log[:(args.PrevLogIndex + 1 + unmatch_idx)]
+                    rf.log = rf.log[:(argsPrevLogIndexInLogView + 1 + unmatch_idx)]
                     rf.log = append(rf.log, args.Entries[unmatch_idx:]...)
                     DAEPrintf("Server (%d) append entries and now log is from %v to %v(index=%d)", rf.me, rf.log[1], rf.log[len(rf.log)-1], len(rf.log)-1)
                 }
             }
 
             // 此时应当还check lastApplied和args.CommitIndex
-            if args.LeaderCommitIndex > rf.commitIndex {
-                i := rf.commitIndex+1
+            rfCommitIndexInLogView := rf.convertToRaftLogViewIndex(rf.commitIndex)
+            argsLeaderCommitIndexInLogView := rf.convertToRaftLogViewIndex(args.LeaderCommitIndex)
+            if argsLeaderCommitIndexInLogView > rfCommitIndexInLogView {
+
+                i := rfCommitIndexInLogView+1
 
                 var newCommitIndex int
-                if args.LeaderCommitIndex < len(rf.log)-1 {
-                    newCommitIndex = args.LeaderCommitIndex
+                if argsLeaderCommitIndexInLogView < len(rf.log)-1 {
+                    newCommitIndex = argsLeaderCommitIndexInLogView
                 }else{
                     newCommitIndex = len(rf.log)-1
                 }
         
-                if rf.lastApplied < newCommitIndex {
+                if rf.convertToRaftLogViewIndex(rf.lastApplied) < newCommitIndex {
                     applyMsgArray := make([]ApplyMsg, newCommitIndex-i+1)
 
                     for ; i <= newCommitIndex; i++ {
                         applyMsg := ApplyMsg{}
                         applyMsg.CommandValid = true
                         applyMsg.Command = rf.log[i].Command
-                        applyMsg.CommandIndex = i
+                        applyMsg.CommandIndex = rf.convertToGlobalViewIndex(i)
 
-                        applyMsgArray[i-rf.commitIndex-1] = applyMsg
+                        applyMsgArray[i-rfCommitIndexInLogView-1] = applyMsg
                     }
 
                     DAEPrintf("Server (%d)[state=%s, term=%d, votedFor=%d] apply message from index=%d to index=%d to applyCh", 
-                        rf.me, rf.state, rf.currentTerm, rf.votedFor, rf.commitIndex, newCommitIndex)
-                    rf.commitIndex = newCommitIndex
+                        rf.me, rf.state, rf.currentTerm, rf.votedFor, rfCommitIndexInLogView, newCommitIndex)
+                    rf.commitIndex = rf.convertToGlobalViewIndex(newCommitIndex)
                     rf.lastApplied = rf.commitIndex
             
                     go func(){
@@ -562,7 +604,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     rf.mu.Unlock()
     rf.convertToFollower()
     return
-
 }
 
 
@@ -571,81 +612,81 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
     return ok
 }
 
+func (rf *Raft) sendAppendEntriesToOneFollower(followerId int) {
+    var args AppendEntriesArgs
+    var reply AppendEntriesReply
+
+    rf.mu.Lock()
+    args.LeaderId = rf.me
+    args.LeaderTerm = rf.currentTerm
+    args.PrevLogIndex = rf.nextIndex[followerId]-1
+    if rf.convertToRaftLogViewIndex(args.PrevLogIndex) >= 0 && rf.convertToRaftLogViewIndex(args.PrevLogIndex) < len(rf.log) {
+        args.PrevLogTerm = rf.log[rf.convertToRaftLogViewIndex(args.PrevLogIndex)].Term
+    }
+    args.LeaderCommitIndex = rf.commitIndex
+    if rf.convertToRaftLogViewIndex(rf.nextIndex[followerId]) > 0 && rf.convertToRaftLogViewIndex(rf.nextIndex[followerId]) < len(rf.log) {
+        args.Entries = rf.log[rf.convertToRaftLogViewIndex(rf.nextIndex[followerId]):]
+    }
+    rf.mu.Unlock()  
+
+    ok := rf.sendAppendEntries(followerId, &args, &reply)
+
+    rf.mu.Lock()
+    if ok && rf.currentTerm == args.LeaderTerm {
+        if !reply.IsSuccess {
+            // 如果Leader发现了更高的term,就convert to follower
+            if reply.FollowerTerm > args.LeaderTerm && rf.state == "Leader" {
+                DLCPrintf("Server (%d) is meet higher term and stop sending Heart Beat", rf.me)
+                rf.state = "Follower"
+                rf.currentTerm = reply.FollowerTerm
+                rf.persist()
+                rf.mu.Unlock()
+                rf.convertToFollower()
+                return
+            }else if rf.nextIndex[followerId] == args.PrevLogIndex + 1 {
+                // find conflict term
+                conflictIndex := 1
+                for conflictIndex < len(rf.log) && rf.log[conflictIndex].Term < reply.ConflictTerm {
+                    conflictIndex++
+                }
+                if conflictIndex != len(rf.log) && rf.log[conflictIndex].Term == reply.ConflictTerm {
+                    DAEPrintf("624: Server (%d) update nextIndex[%d] from %d to %d", rf.me, followerId, rf.nextIndex[followerId], rf.convertToGlobalViewIndex(conflictIndex + 1))
+                    rf.nextIndex[followerId] = rf.convertToGlobalViewIndex(conflictIndex + 1)
+                }else{
+                    DAEPrintf("628: Server (%d) update nextIndex[%d] from %d to %d", rf.me, followerId, rf.nextIndex[followerId], reply.ConflictIndex)
+                    rf.nextIndex[followerId] = reply.ConflictIndex
+                }
+            }
+        }else if rf.nextIndex[followerId] == args.PrevLogIndex + 1 {
+            DAEPrintf("632: Server (%d) update nextIndex[%d] from %d to %d", rf.me, followerId, rf.nextIndex[followerId], args.PrevLogIndex + len(args.Entries) + 1)
+            rf.nextIndex[followerId] = args.PrevLogIndex + len(args.Entries) + 1
+            rf.matchIndex[followerId] = args.PrevLogIndex + len(args.Entries)
+
+            //rf.commitEntries()
+        }
+    }
+    rf.mu.Unlock()
+}
+
 //
 // As a leader, need to send Append Entries RPC periodically to followers
 // when Entry is empty, it is a heartbeat
 //
 func (rf *Raft) sendAppendEntriesToMultipleFollowers() {
-    meetHigherTerm := -1
-
-    for !rf.killed() {
+    for !rf.killed() && rf.state == "Leader" {
         for i := 0; i < len(rf.peers); i++ {
             if i == rf.me {
                 continue
             }else{
-                go func(followerId int) {
-                    rf.mu.Lock()
-                    if rf.state == "Leader"{
-                        var args AppendEntriesArgs
-                        var reply AppendEntriesReply
-
-                        args.LeaderId = rf.me
-                        args.LeaderTerm = rf.currentTerm
-                        args.PrevLogIndex = rf.nextIndex[followerId]-1
-                        args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-                        args.LeaderCommitIndex = rf.commitIndex
-                        if rf.nextIndex[followerId] != len(rf.log) {
-                            args.Entries = rf.log[rf.nextIndex[followerId]:]
-                        }
-                        rf.mu.Unlock()  
-
-                        ok := rf.sendAppendEntries(followerId, &args, &reply)
-                    
-                        rf.mu.Lock()
-                        if ok && rf.currentTerm == args.LeaderTerm {
-                            if !reply.IsSuccess {
-                                // 如果Leader发现了更高的term,就convert to follower
-                                if reply.FollowerTerm > args.LeaderTerm && rf.state == "Leader" {
-                                        meetHigherTerm = reply.FollowerTerm
-                                }else{
-                                    // find conflict term
-                                    conflictIndex := 1
-                                    for conflictIndex < len(rf.log) && rf.log[conflictIndex].Term < reply.ConflictTerm {
-                                        conflictIndex++
-                                    }
-                                    if conflictIndex != len(rf.log) && rf.log[conflictIndex].Term == reply.ConflictTerm {
-                                        DAEPrintf("549: Server (%d) update nextIndex[%d] from %d to %d", rf.me, followerId, rf.nextIndex[followerId], conflictIndex + 1)
-                                        rf.nextIndex[followerId] = conflictIndex + 1
-                                    }else{
-                                        DAEPrintf("552: Server (%d) update nextIndex[%d] from %d to %d", rf.me, followerId, rf.nextIndex[followerId], reply.ConflictIndex)
-                                        rf.nextIndex[followerId] = reply.ConflictIndex
-                                    }
-                                }
-                            }else{
-                                DAEPrintf("557: Server (%d) update nextIndex[%d] from %d to %d", rf.me, followerId, rf.nextIndex[followerId], args.PrevLogIndex + len(args.Entries) + 1)
-                                rf.nextIndex[followerId] = args.PrevLogIndex + len(args.Entries) + 1
-                                rf.matchIndex[followerId] = args.PrevLogIndex + len(args.Entries)
-                            }
-                        }
-                        rf.mu.Unlock()
-                    }else{
-                        rf.mu.Unlock()
-                    }
-                }(i)
+                if rf.nextIndex[i] <= rf.snapshottedIndex {
+                    go rf.sendInstallSnapshotToOneFollower(i, rf.log[0].Term)
+                }else{
+                    go rf.sendAppendEntriesToOneFollower(i)
+                }
             }
         }
 
         rf.mu.Lock()
-        if meetHigherTerm != -1 {
-            DLCPrintf("Server (%d) is meet higher term and stop sending Heart Beat", rf.me)
-            rf.currentTerm = meetHigherTerm
-            rf.state = "Follower"
-            rf.persist()
-            rf.mu.Unlock()
-            rf.convertToFollower()
-            return
-        }
-
         if rf.state != "Leader" {
             DLCPrintf("Server (%d) is no longer Leader and stop sending Heart Beat", rf.me)
             rf.persist()
@@ -665,7 +706,9 @@ func (rf *Raft) commitEntries() {
     var applyMsgArray []ApplyMsg
     ableCommit := false
 
-    i := rf.commitIndex + 1
+    commitIndexInRaftView := rf.convertToRaftLogViewIndex(rf.commitIndex)
+
+    i := commitIndexInRaftView + 1
     for ; i < len(rf.log); i++ {
         if rf.log[i].Term < rf.currentTerm {
             continue
@@ -677,7 +720,7 @@ func (rf *Raft) commitEntries() {
                 if j == rf.me {
                     continue
                 }else{
-                    if rf.matchIndex[j] >= i {
+                    if rf.convertToRaftLogViewIndex(rf.matchIndex[j]) >= i {
                         count++
                     }
                 }
@@ -692,19 +735,19 @@ func (rf *Raft) commitEntries() {
 
     if ableCommit {
         // commit index=rf.commitIndex + 1 -> i
-        applyMsgArray = make([]ApplyMsg, i-rf.commitIndex-1)
-        for k := rf.commitIndex+1; k < i; k++ {
+        applyMsgArray = make([]ApplyMsg, i-commitIndexInRaftView-1)
+        for k := commitIndexInRaftView+1; k < i; k++ {
             applyMsg := ApplyMsg{}
             applyMsg.CommandValid = true
             applyMsg.Command = rf.log[k].Command
-            applyMsg.CommandIndex = k
+            applyMsg.CommandIndex = rf.convertToGlobalViewIndex(k)
 
-            applyMsgArray[k-rf.commitIndex-1] = applyMsg
+            applyMsgArray[k-commitIndexInRaftView-1] = applyMsg
         }
         DAEPrintf("Server (%d)[state=%s, term=%d, votedFor=%d] apply message from index=%d to index=%d to applyCh", 
-            rf.me, rf.state, rf.currentTerm, rf.votedFor, rf.commitIndex, i-1)
+            rf.me, rf.state, rf.currentTerm, rf.votedFor, commitIndexInRaftView, i-1)
         
-        rf.commitIndex = i-1
+        rf.commitIndex = rf.convertToGlobalViewIndex(i-1)
         rf.lastApplied = rf.commitIndex
     }
     
@@ -719,6 +762,19 @@ func (rf *Raft) commitEntries() {
     }
 } 
 
+func (rf *Raft) startAppendEntries() {
+    for i := 0; i < len(rf.peers); i++ {
+        if i == rf.me {
+            continue
+        }else{
+            if rf.nextIndex[i] <= rf.snapshottedIndex {
+                go rf.sendInstallSnapshotToOneFollower(i, rf.log[0].Term)
+            }else{
+                go rf.sendAppendEntriesToOneFollower(i)
+            }
+        }
+    }
+}
 
 /***************************************************************************
                             Install Snapshot RPC
@@ -749,10 +805,20 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
         return
     }
 
-    reply.FollowerTerm = args.LeaderTerm
+    reply.FollowerTerm = rf.currentTerm
 
-    if args.LastIncludedIndex < len(rf.log) && args.LastIncludedTerm == rf.log[args.LastIncludedIndex].Term {
-        rf.cutoffLogBeforeIndex(args.LastIncludedIndex)
+    raftViewIndex := rf.convertToRaftLogViewIndex(args.LastIncludedIndex)
+    if raftViewIndex <= 0 {
+        return
+    }
+
+    if raftViewIndex >= len(rf.log) || (raftViewIndex < len(rf.log) && args.LastIncludedTerm == rf.log[raftViewIndex].Term) {
+        rf.cutoffLogBeforeIndex(raftViewIndex, args.LastIncludedTerm)
+        rf.snapshottedIndex = args.LastIncludedIndex
+        if rf.commitIndex < args.LastIncludedIndex {
+            rf.commitIndex = args.LastIncludedIndex
+            rf.lastApplied = rf.commitIndex
+        }
         // generate an applyMsg and pass it to applCh
         applyMsg := ApplyMsg{}
         // indicate that it is not a command, it is a snapshot
@@ -765,11 +831,14 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
             DErrPrintf("read snapshot data error")
             return
         }
+
+        rf.persistWithSnapshot(commandSnapshot)
+
         applyMsg.CommandSnapshot = commandSnapshot
         DPrintfSnapshot(commandSnapshot)
 
         go func() {
-            DISPrintf("Server(%d) send a snapshot to its applyCh", rf.me)
+            DISPrintf("Follower(%d) send a snapshot to its applyCh", rf.me)
             rf.applyCh <- applyMsg
         }()
     }
@@ -781,38 +850,44 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
     return ok
 }
 
-
-func (rf *Raft) sendInstallSnapshotToMultipleFollowers(snapshot Snapshot, lastIncludedTerm int) {
+func (rf *Raft) sendInstallSnapshotToOneFollower(followerId int, lastIncludedTerm int) {
     var installSnapshotArgs InstallSnapshotArgs
+    var installSnapshotReply InstallSnapshotReply
 
     rf.mu.Lock()
-
-    DISPrintf("Leader(%d) start to send InstallSnapshot RPC to followers", rf.me)
+    DISPrintf("Leader(%d) start to send InstallSnapshot RPC(LeaderTerm=%d, LastIncludedIndex=%d, LastIncludedTerm=%d) to follower(%d)", rf.me, rf.currentTerm, rf.snapshottedIndex, 
+        lastIncludedTerm, followerId)
     installSnapshotArgs.LeaderTerm = rf.currentTerm
     installSnapshotArgs.LeaderId = rf.me
-    installSnapshotArgs.LastIncludedIndex = snapshot.LastLogIndex
+    installSnapshotArgs.LastIncludedIndex = rf.snapshottedIndex
     installSnapshotArgs.LastIncludedTerm = lastIncludedTerm
-    // use labgob convert snapshot to data
-    w := new(bytes.Buffer)
-    e := labgob.NewEncoder(w)
-    e.Encode(snapshot)
-    data := w.Bytes()
-    installSnapshotArgs.Data = data
-
+    installSnapshotArgs.Data = rf.persister.ReadSnapshot()
     rf.mu.Unlock()
 
+    ok := rf.sendInstallSnapshot(followerId, &installSnapshotArgs, &installSnapshotReply)
+    if ok {
+        if installSnapshotReply.FollowerTerm > rf.currentTerm {
+            rf.currentTerm = installSnapshotReply.FollowerTerm
+            rf.convertToFollower()
+        }else{
+            rf.mu.Lock()
+            if rf.matchIndex[followerId] < installSnapshotArgs.LastIncludedIndex {
+                rf.matchIndex[followerId] = installSnapshotArgs.LastIncludedIndex
+            }
+            DISPrintf("Leader(%d) update rf.nextIndex[%d] from %d to %d", rf.me, followerId, rf.nextIndex[followerId], rf.matchIndex[followerId] + 1)
+            rf.nextIndex[followerId] = rf.matchIndex[followerId] + 1
+            rf.mu.Unlock()
+        }
+    }
+}
+
+func (rf *Raft) sendInstallSnapshotToMultipleFollowers(lastIncludedIndex int, lastIncludedTerm int) {
     for i:=0; i<len(rf.peers);i++ {
         if i == rf.me {
             continue
         }else{
-            var installSnapshotReply InstallSnapshotReply
-
-            ok := rf.sendInstallSnapshot(i, &installSnapshotArgs, &installSnapshotReply)
-            if ok {
-                if installSnapshotReply.FollowerTerm > rf.currentTerm {
-                    rf.currentTerm = installSnapshotReply.FollowerTerm
-                    rf.convertToFollower()
-                }
+            if rf.nextIndex[i] <= lastIncludedIndex {
+                go rf.sendInstallSnapshotToOneFollower(i, lastIncludedTerm)
             }
         }
     }
@@ -862,8 +937,8 @@ func (rf *Raft) convertToLeader() {
     rf.electionTimer.Stop()    
     rf.state = "Leader"
     for i:=0; i<len(rf.peers); i++ {
-        rf.nextIndex[i] = len(rf.log)
-        rf.matchIndex[i] = 0
+        rf.nextIndex[i] = rf.convertToGlobalViewIndex(len(rf.log))
+        rf.matchIndex[i] = rf.convertToGlobalViewIndex(0)
     }
     rf.mu.Unlock()
     // 启动一个线程,定时给各个Follower发送HeartBeat Request 
@@ -889,36 +964,14 @@ func (rf *Raft) electionTimeoutListener() {
 //
 // cut off log ahead of given index
 //
-func (rf *Raft) cutoffLogBeforeIndex(lastLogIndex int) {
+func (rf *Raft) cutoffLogBeforeIndex(lastLogIndex int, lastLogTerm int) {
+    DISPrintf("Start to cut off server(%d) log. lastLogIndex=%d, lastLogfTerm=%d, before cut off its len(log)=%d", rf.me, lastLogIndex, lastLogTerm, len(rf.log))
     if lastLogIndex >= len(rf.log) {
-        rf.log = make([]Entry, 1, 200)
-        rf.log[0].Term = 0
-
-        rf.commitIndex = 0
-        rf.lastApplied = 0
-    }else if lastLogIndex <= rf.commitIndex {
-        // update raft state
+        rf.log = make([]Entry, 1, 100)
+        rf.log[0].Term = lastLogTerm
+    }else if rf.convertToGlobalViewIndex(lastLogIndex) <= rf.commitIndex {
         rf.log = rf.log[lastLogIndex:]
-        rf.log[0].Term = 0
-
-        if rf.commitIndex >= lastLogIndex {
-            rf.commitIndex = rf.commitIndex - lastLogIndex + 1
-        }else{
-            rf.commitIndex = 0
-        }
-
-        if rf.lastApplied >= lastLogIndex {
-            rf.lastApplied = rf.lastApplied - lastLogIndex + 1
-        }else{
-            rf.lastApplied = 0
-        }
-
-        for i:=0; i<len(rf.peers); i++ {
-            rf.nextIndex[i] = len(rf.log)
-            rf.matchIndex[i] = 0
-        }
-
-        DISPrintf("Cut off server(%d) log success. Now its len(log)=%d, commitIndex=%d, lastApplied=%d", rf.me, len(rf.log), rf.commitIndex, rf.lastApplied)
+        DISPrintf("Cut off server(%d) log success and now its len(log)=%d", rf.me, len(rf.log))
     }
 }
 
@@ -944,6 +997,21 @@ func DPrintfSnapshot(snapshot Snapshot) {
     DISPrintf("Snapshot.LastLogIndex: %d", snapshot.LastLogIndex)
     DISPrintf("------ Snapshot End ------")
 }
+
+
+
+//
+// Index converter
+//
+func (rf *Raft) convertToGlobalViewIndex(raftViewIndex int) int {
+    return raftViewIndex +  rf.snapshottedIndex
+}
+
+func (rf* Raft) convertToRaftLogViewIndex(kvServerViewIndex int) int {
+    return kvServerViewIndex - rf.snapshottedIndex
+}
+
+
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -974,13 +1042,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
         newEntry.Command = command
         newEntry.Term = rf.currentTerm
 
-        index = len(rf.log)
+        index = rf.convertToGlobalViewIndex(len(rf.log))
         term = rf.currentTerm
         rf.log = append(rf.log, newEntry)
 
         rf.persist()
+        //go rf.startAppendEntries()
 
-        DLCPrintf("Leader (%d) append entries and now log is from %v to %v(index=%d)", rf.me, rf.log[1], rf.log[len(rf.log)-1], len(rf.log)-1)
+        DLCPrintf("Leader (%d) append entries and now log is from %v to %v(index=%d in Raft Log view)", rf.me, rf.log[1], rf.log[len(rf.log)-1], len(rf.log)-1)
     }
     rf.mu.Unlock()
 
@@ -1027,7 +1096,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
     rf.me = me
     rf.applyCh = applyCh
 
-    const Log_CAPACITY int = 1200
+    const Log_CAPACITY int = 100
     rf.initRaftNodeToFollower(Log_CAPACITY)
 
     // initialize from state persisted before a crash

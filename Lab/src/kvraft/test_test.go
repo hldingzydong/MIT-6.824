@@ -243,14 +243,14 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		}
 
 		if crash {
-			// log.Printf("shutdown servers\n")
+			log.Printf("shutdown servers\n")
 			for i := 0; i < nservers; i++ {
 				cfg.ShutdownServer(i)
 			}
 			// Wait for a while for servers to shutdown, since
 			// shutdown isn't a real crash and isn't instantaneous
 			time.Sleep(electionTimeout)
-			// log.Printf("restart servers\n")
+			log.Printf("restart servers\n")
 			// crash and re-start all
 			for i := 0; i < nservers; i++ {
 				cfg.StartServer(i)
@@ -446,7 +446,7 @@ func GenericTestLinearizability(t *testing.T, part string, nclients int, nserver
 		fmt.Println("info: linearizability check timed out, assuming history is ok")
 	}
 }
-
+/*
 func TestBasic3A(t *testing.T) {
 	// Test: one client (3A) ...
 	GenericTest(t, "3A", 1, false, false, false, -1)
@@ -593,7 +593,7 @@ func TestPersistConcurrent3A(t *testing.T) {
 	// Test: restarts, many clients (3A) ...
 	GenericTest(t, "3A", 5, false, true, false, -1)
 }
-
+*/
 
 func TestPersistConcurrentUnreliable3A(t *testing.T) {
 	// Test: unreliable net, restarts, many clients (3A) ...
@@ -616,6 +616,7 @@ func TestPersistPartitionUnreliableLinearizable3A(t *testing.T) {
 	GenericTestLinearizability(t, "3A", 15, 7, true, true, true, -1)
 }
 
+/*
 //
 // if one server falls behind, then rejoins, does it
 // recover by using the InstallSnapshot RPC?
@@ -676,7 +677,8 @@ func TestSnapshotRPC3B(t *testing.T) {
 
 	cfg.end()
 }
-
+*/
+/*
 // are the snapshots not too huge? 500 bytes is a generous bound for the
 // operations we're doing here.
 func TestSnapshotSize3B(t *testing.T) {
@@ -711,7 +713,8 @@ func TestSnapshotSize3B(t *testing.T) {
 
 	cfg.end()
 }
-
+*/
+/*
 func TestSnapshotRecover3B(t *testing.T) {
 	// Test: restarts, snapshots, one client (3B) ...
 	GenericTest(t, "3B", 1, false, true, false, 1000)
@@ -721,17 +724,20 @@ func TestSnapshotRecoverManyClients3B(t *testing.T) {
 	// Test: restarts, snapshots, many clients (3B) ...
 	GenericTest(t, "3B", 20, false, true, false, 1000)
 }
+*/
 
 func TestSnapshotUnreliable3B(t *testing.T) {
 	// Test: unreliable net, snapshots, many clients (3B) ...
 	GenericTest(t, "3B", 5, true, false, false, 1000)
 }
 
+/*
 func TestSnapshotUnreliableRecover3B(t *testing.T) {
 	// Test: unreliable net, restarts, snapshots, many clients (3B) ...
 	GenericTest(t, "3B", 5, true, true, false, 1000)
 }
-
+*/
+/*
 func TestSnapshotUnreliableRecoverConcurrentPartition3B(t *testing.T) {
 	// Test: unreliable net, restarts, partitions, snapshots, many clients (3B) ...
 	GenericTest(t, "3B", 5, true, true, true, 1000)
@@ -741,3 +747,4 @@ func TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable3B(t *testing.T
 	// Test: unreliable net, restarts, partitions, snapshots, linearizability checks (3B) ...
 	GenericTestLinearizability(t, "3B", 15, 7, true, true, true, 1000)
 }
+*/

@@ -12,7 +12,7 @@ import (
 	"bytes"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -43,7 +43,7 @@ type KVServer struct {
 	serverMap		map[string]string // store <key,value>   
 
 	persister 		*raft.Persister          // Object to hold this peer's persisted state
-	lastLogIndex    int
+	lastLogIndex    int               // global view
 }
 
 
@@ -65,7 +65,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}else{
-		DPrintf("server.go: Leader[%d] receive Get RPC from Clerk[%d](args.Uuid=%d, args.Key=%s)", kv.me, args.ClerkId, args.Uuid, args.Key)
+		//DPrintf("server.go: Leader[%d] receive Get RPC from Clerk[%d](args.Uuid=%d, args.Key=%s)", kv.me, args.ClerkId, args.Uuid, args.Key)
 		// 由clerkId + uuid 可以确认全剧唯一的请求，依此对该请求生成一个channel
 		requestUuid := strconv.FormatInt(args.ClerkId,10) + strconv.FormatInt(args.Uuid,10)
 
@@ -94,7 +94,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 				kv.mu.Lock()
 				defer kv.mu.Unlock()
 
-				DPrintf("server.go: Leader[%d] respond to Get RPC from Clerk[%d](args.Uuid=%d, args.Key=%s)", kv.me, args.ClerkId, args.Uuid, args.Key)
+				//DPrintf("server.go: Leader[%d] respond to Get RPC from Clerk[%d](args.Uuid=%d, args.Key=%s)", kv.me, args.ClerkId, args.Uuid, args.Key)
 				lastValue, ok := kv.serverMap[op.Key]
 				if ok {
 					reply.Err = OK
@@ -192,13 +192,13 @@ func (kv *KVServer) DaemonThread() {
 		applyMsg := <- kv.applyCh
 		DPrintf("server.go: Server[%d] read an applyMsg[%v] from its applyCh", kv.me, applyMsg)
 		if !applyMsg.CommandValid {
-			// this is a snapshot
+			// this is a snapshot come from Leader
 			DPrintf("server.go: Server[%d] get snapshot from its Raft", kv.me)
 			snapshot := applyMsg.CommandSnapshot
 			kv.mu.Lock()
 			kv.serverMap = snapshot.ServerMap
 			kv.lastApplyIdMap = snapshot.LastApplyIdMap
-			kv.lastLogIndex = 0
+			//kv.lastLogIndex = snapshot.LastLogIndex
 			kv.mu.Unlock()
 		}else{
 			getOp := applyMsg.Command.(Op)
@@ -228,7 +228,16 @@ func (kv *KVServer) DaemonThread() {
 						kv.serverMap[getOp.Key] = getOp.Value
 					}
 				}
+
+				// check if need to install snapshot
+				if kv.isNeedToSnapshot() {
+					kv.callRaftStartSnapshot()
+				}
 			}else{
+				// check if need to install snapshot
+				if kv.isNeedToSnapshot() {
+					kv.callRaftStartSnapshot()
+				}
 				kv.mu.Unlock()
 				continue
 			}
@@ -248,36 +257,35 @@ func (kv *KVServer) DaemonThread() {
 // then it needs to a backup thread to periodically check if need to 
 // take a snapshot now and tell raft
 //
-func (kv *KVServer) SnapshotDetectThread() {
-	// bound condition
-	maxRaftPersistSize := kv.maxraftstate * 3 / 2
-	DPrintf("server.go: Server(%d)'s max raft persiste size is %d", kv.me, maxRaftPersistSize)
-	for !kv.killed() {
-		// every 100 ms check if need to take a snapshot
-		time.Sleep(100 * time.Millisecond)
-		
-		kv.mu.Lock()
-		raftSize := kv.persister.RaftStateSize()
-		if raftSize > maxRaftPersistSize {
-			var snapshot raft.Snapshot
-			snapshot.ServerMap = make(map[string]string)
-			for k,v := range kv.serverMap {
-				snapshot.ServerMap[k] = v
-			}
-
-			snapshot.LastApplyIdMap = make(map[int64]int64)
-			for k,v := range kv.lastApplyIdMap {
-				snapshot.LastApplyIdMap[k] = v
-			}
-
-			snapshot.LastLogIndex = kv.lastLogIndex
-			//kv.lastLogIndex = 0
-
-			kv.rf.StartSnapshot(snapshot)
-			DPrintf("server.go: Wow!!! current raft persist size is %d, Server(%d) take a snapshot and notify its raft", raftSize, kv.me)
-		}
-		kv.mu.Unlock()
+func (kv *KVServer) isNeedToSnapshot() bool {
+	if kv.maxraftstate < 0 {
+		return false
 	}
+	maxRaftPersistSize := kv.maxraftstate * 9 / 10
+	raftSize := kv.persister.RaftStateSize()
+	if raftSize > maxRaftPersistSize {
+		return true
+	}
+	return false
+}
+
+
+func (kv *KVServer) callRaftStartSnapshot() {
+	var snapshot raft.Snapshot
+	snapshot.ServerMap = make(map[string]string)
+	for k,v := range kv.serverMap {
+		snapshot.ServerMap[k] = v
+	}
+
+	snapshot.LastApplyIdMap = make(map[int64]int64)
+	for k,v := range kv.lastApplyIdMap {
+		snapshot.LastApplyIdMap[k] = v
+	}
+
+	snapshot.LastLogIndex = kv.lastLogIndex
+
+	kv.rf.StartSnapshot(snapshot)
+	DPrintf("server.go: Wow!!! Server(%d) take a snapshot(snapshot.LastLogIndex=%d) and notify its raft", kv.me, kv.lastLogIndex)
 }
 
 
@@ -350,10 +358,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	}
 
 	go kv.DaemonThread()
-
-	if kv.maxraftstate > -1 {
-		go kv.SnapshotDetectThread()
-	}
 
 	return kv
 }

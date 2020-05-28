@@ -7,7 +7,7 @@ import "log"
 const DebugForLifeCycle = 0
 const DebugForRequestVote = 0
 const DebugForAppendEntry = 0
-const DebugForInstallSnapshot = 1
+const DebugForInstallSnapshot = 0
 const DebugErr = 0
 
 
