@@ -5,5 +5,3 @@
 ####  lab2跑了100次test均pass
 
 ####  lab3B 在Start() Raft之后立即同步心跳,但是连2C都fail，仍需探究
-
-####  lab3B 存在 bug

@@ -42,7 +42,6 @@ type KVServer struct {
 	clerkChannelMap map[string]chan Op // store <clerkId+uuid, clerkNotifyChannel>
 	serverMap		map[string]string // store <key,value>   
 
-	persister 		*raft.Persister          // Object to hold this peer's persisted state
 	lastLogIndex    int               // global view
 }
 
@@ -194,11 +193,13 @@ func (kv *KVServer) DaemonThread() {
 		if !applyMsg.CommandValid {
 			// this is a snapshot come from Leader
 			DPrintf("server.go: Server[%d] get snapshot from its Raft", kv.me)
-			snapshot := applyMsg.CommandSnapshot
+			snapshotInBytes := applyMsg.CommandSnapshot
 			kv.mu.Lock()
-			kv.serverMap = snapshot.ServerMap
-			kv.lastApplyIdMap = snapshot.LastApplyIdMap
-			//kv.lastLogIndex = snapshot.LastLogIndex
+			r := bytes.NewBuffer(snapshotInBytes)
+    		d := labgob.NewDecoder(r)
+    		if d.Decode(&kv.serverMap) != nil || d.Decode(&kv.lastApplyIdMap) != nil {
+        		return
+    		}
 			kv.mu.Unlock()
 		}else{
 			getOp := applyMsg.Command.(Op)
@@ -262,7 +263,7 @@ func (kv *KVServer) isNeedToSnapshot() bool {
 		return false
 	}
 	maxRaftPersistSize := kv.maxraftstate * 9 / 10
-	raftSize := kv.persister.RaftStateSize()
+	raftSize := kv.rf.ReadPersistSnapshotSize()
 	if raftSize > maxRaftPersistSize {
 		return true
 	}
@@ -271,20 +272,14 @@ func (kv *KVServer) isNeedToSnapshot() bool {
 
 
 func (kv *KVServer) callRaftStartSnapshot() {
-	var snapshot raft.Snapshot
-	snapshot.ServerMap = make(map[string]string)
-	for k,v := range kv.serverMap {
-		snapshot.ServerMap[k] = v
-	}
+	w := new(bytes.Buffer)
+    e := labgob.NewEncoder(w)
+    e.Encode(kv.serverMap)
+    e.Encode(kv.lastApplyIdMap)
+    e.Encode(kv.lastLogIndex)
+    snapshotInBytes := w.Bytes()
 
-	snapshot.LastApplyIdMap = make(map[int64]int64)
-	for k,v := range kv.lastApplyIdMap {
-		snapshot.LastApplyIdMap[k] = v
-	}
-
-	snapshot.LastLogIndex = kv.lastLogIndex
-
-	kv.rf.StartSnapshot(snapshot)
+	kv.rf.StartSnapshot(snapshotInBytes)
 	DPrintf("server.go: Wow!!! Server(%d) take a snapshot(snapshot.LastLogIndex=%d) and notify its raft", kv.me, kv.lastLogIndex)
 }
 
@@ -331,23 +326,27 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-	kv.persister = persister
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.clerkChannelMap = make(map[string]chan Op)
 
 	// read persister‘s current snapshot
-	snapshotInBytes := kv.persister.ReadSnapshot()
+	snapshotInBytes := kv.rf.ReadPersistSnapshot()
 	if len(snapshotInBytes) > 0 {
 		DPrintf("server.go: Server(%d) read snapshot from its persister", kv.me)
 		r := bytes.NewBuffer(snapshotInBytes)
     	d := labgob.NewDecoder(r)
     	var snapshot raft.Snapshot
-    	if d.Decode(&snapshot) != nil {
+    	if d.Decode(&snapshot.ServerMap) != nil || d.Decode(&snapshot.LastApplyIdMap) != nil {
         	DPrintf("read snapshot error")
         	return nil
     	}
+    	if d.Decode(&snapshot.LastLogIndex) != nil {
+    		DPrintf("read snapshot error")
+        	return nil
+    	}
+
     	kv.lastApplyIdMap = snapshot.LastApplyIdMap
     	kv.serverMap = snapshot.ServerMap
     	kv.lastLogIndex = snapshot.LastLogIndex

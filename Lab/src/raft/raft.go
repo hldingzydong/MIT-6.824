@@ -69,7 +69,7 @@ type ApplyMsg struct {
     CommandValid bool
     Command      interface{}
     CommandIndex int
-    CommandSnapshot   Snapshot          // when a follower receive a snapshot RPC, it should fill the CommandSnapshot and send it to its kvserver
+    CommandSnapshot   []byte          // when a follower receive a snapshot RPC, it should fill the CommandSnapshot and send it to its kvserver
 }
 
 /*
@@ -231,8 +231,7 @@ func (rf *Raft) readPersist(data []byte) {
     DLCPrintf("Read Server(%d) state(currentTerm=%d, votedFor=%d, logLength=%d) from persister done", rf.me, rf.currentTerm, rf.votedFor, len(rf.log))
 }
 
-
-func (rf *Raft) persistWithSnapshot(snapshot Snapshot) {
+func (rf *Raft) persistWithSnapshotInBytes(snapshotInBytes []byte) {
     w1 := new(bytes.Buffer)
     e1 := labgob.NewEncoder(w1)
     e1.Encode(rf.currentTerm)
@@ -241,21 +240,36 @@ func (rf *Raft) persistWithSnapshot(snapshot Snapshot) {
     e1.Encode(rf.snapshottedIndex)
     stateInBytes := w1.Bytes()
 
-    w2 := new(bytes.Buffer)
-    e2 := labgob.NewEncoder(w2)
-    e2.Encode(snapshot)
-    snapshotInBytes := w2.Bytes()
-
     rf.persister.SaveStateAndSnapshot(stateInBytes, snapshotInBytes)
 }
 
+func (rf *Raft) ReadPersistSnapshot() []byte {
+    return rf.persister.ReadSnapshot()
+}
+
+func (rf *Raft) ReadPersistSnapshotSize() int {
+    return rf.persister.RaftStateSize()
+}
 
 //
 // start take a snapshot and persist its state
 //
-func (rf *Raft) StartSnapshot(snapshot Snapshot) {
+func (rf *Raft) StartSnapshot(snapshotInBytes []byte) {
     rf.mu.Lock()
     defer rf.mu.Unlock()
+
+    var snapshot Snapshot
+    r := bytes.NewBuffer(snapshotInBytes)
+    d := labgob.NewDecoder(r)
+    if d.Decode(&snapshot.ServerMap) != nil {
+        return
+    }
+    if d.Decode(&snapshot.LastApplyIdMap) != nil {
+        return
+    }
+    if d.Decode(&snapshot.LastLogIndex) != nil {
+        return
+    }
 
     lastLogIndexInLogView := rf.convertToRaftLogViewIndex(snapshot.LastLogIndex)
     if lastLogIndexInLogView > 0 && lastLogIndexInLogView < len(rf.log) {
@@ -263,12 +277,12 @@ func (rf *Raft) StartSnapshot(snapshot Snapshot) {
         rf.cutoffLogBeforeIndex(lastLogIndexInLogView, lastIncludedTerm)
         rf.snapshottedIndex = snapshot.LastLogIndex
 
-        rf.persistWithSnapshot(snapshot)
-/*
+        rf.persistWithSnapshotInBytes(snapshotInBytes)
+
         if rf.state == "Leader" {
             go rf.sendInstallSnapshotToMultipleFollowers(snapshot.LastLogIndex, lastIncludedTerm)
         }
-*/
+
     }
     return
 }
@@ -674,8 +688,15 @@ func (rf *Raft) sendAppendEntriesToOneFollower(followerId int) {
 // when Entry is empty, it is a heartbeat
 //
 func (rf *Raft) sendAppendEntriesToMultipleFollowers() {
-    for !rf.killed() && rf.state == "Leader" {
-        for i := 0; i < len(rf.peers); i++ {
+    for !rf.killed() {
+        rf.mu.Lock()
+        if rf.state != "Leader" {
+            DLCPrintf("Server (%d) is no longer Leader and stop sending Heart Beat", rf.me)
+            rf.mu.Unlock()
+            return
+        }
+
+        for i := 0; i < len(rf.peers) && rf.state == "Leader"; i++ {
             if i == rf.me {
                 continue
             }else{
@@ -686,11 +707,8 @@ func (rf *Raft) sendAppendEntriesToMultipleFollowers() {
                 }
             }
         }
-
-        rf.mu.Lock()
         if rf.state != "Leader" {
             DLCPrintf("Server (%d) is no longer Leader and stop sending Heart Beat", rf.me)
-            rf.persist()
             rf.mu.Unlock()
             return
         }
@@ -762,7 +780,7 @@ func (rf *Raft) commitEntries() {
         }()
     }
 } 
-
+/*
 func (rf *Raft) startAppendEntries() {
     for i := 0; i < len(rf.peers); i++ {
         if i == rf.me {
@@ -778,7 +796,7 @@ func (rf *Raft) startAppendEntries() {
 
     rf.commitEntries()
 }
-
+*/
 /***************************************************************************
                             Install Snapshot RPC
 ***************************************************************************/
@@ -803,48 +821,52 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
     DISPrintf("Server(%d) receive InstallSnapshot RPC from Leader(%d)[LeaderTerm=%d, LastIncludedIndex=%d, LastIncludedTerm=%d]", rf.me, args.LeaderId,
                 args.LeaderTerm, args.LastIncludedIndex, args.LastIncludedTerm)
-    if args.LeaderTerm < rf.currentTerm {
+    raftViewIndex := rf.convertToRaftLogViewIndex(args.LastIncludedIndex)
+
+    if args.LeaderTerm < rf.currentTerm || raftViewIndex < 0 {
         reply.FollowerTerm = rf.currentTerm
         return
     }
 
+    if args.LeaderTerm > rf.currentTerm {
+        rf.currentTerm = args.LeaderTerm
+        rf.mu.Unlock()
+        rf.convertToFollower()
+        rf.mu.Lock()
+    }
+
     reply.FollowerTerm = rf.currentTerm
 
-    raftViewIndex := rf.convertToRaftLogViewIndex(args.LastIncludedIndex)
-    if raftViewIndex <= 0 {
+    if raftViewIndex < len(rf.log) && args.LastIncludedTerm == rf.log[raftViewIndex].Term {
+        rf.log = rf.log[raftViewIndex:]
+    }else{
+        rf.log = make([]Entry, 1, 100)
+        rf.log[0].Term = args.LastIncludedTerm
+    }
+
+    rf.snapshottedIndex = args.LastIncludedIndex
+    if rf.commitIndex < args.LastIncludedIndex {
+        rf.commitIndex = args.LastIncludedIndex
+            
+    }
+    if rf.lastApplied < args.LastIncludedIndex {
+        rf.lastApplied = rf.commitIndex
+    }
+
+    rf.persistWithSnapshotInBytes(args.Data)
+
+    if rf.lastApplied > args.LastIncludedIndex {
         return
     }
 
-    if raftViewIndex >= len(rf.log) || (raftViewIndex < len(rf.log) && args.LastIncludedTerm == rf.log[raftViewIndex].Term) {
-        rf.cutoffLogBeforeIndex(raftViewIndex, args.LastIncludedTerm)
-        rf.snapshottedIndex = args.LastIncludedIndex
-        if rf.commitIndex < args.LastIncludedIndex {
-            rf.commitIndex = args.LastIncludedIndex
-            rf.lastApplied = rf.commitIndex
-        }
-        // generate an applyMsg and pass it to applCh
-        applyMsg := ApplyMsg{}
-        // indicate that it is not a command, it is a snapshot
-        applyMsg.CommandValid = false
-        // use labgob decode data from InstallSnapshot RPC
-        r := bytes.NewBuffer(args.Data)
-        d := labgob.NewDecoder(r)
-        var commandSnapshot Snapshot
-        if d.Decode(&commandSnapshot) != nil {
-            DErrPrintf("read snapshot data error")
-            return
-        }
+    applyMsg := ApplyMsg{}
+    applyMsg.CommandValid = false
+    applyMsg.CommandSnapshot = args.Data
 
-        rf.persistWithSnapshot(commandSnapshot)
-
-        applyMsg.CommandSnapshot = commandSnapshot
-        DPrintfSnapshot(commandSnapshot)
-
-        go func() {
-            DISPrintf("Follower(%d) send a snapshot to its applyCh", rf.me)
-            rf.applyCh <- applyMsg
-        }()
-    }
+    go func() {
+        DISPrintf("Follower(%d) send a snapshot to its applyCh", rf.me)
+        rf.applyCh <- applyMsg
+    }()
 }
 
 
@@ -858,6 +880,10 @@ func (rf *Raft) sendInstallSnapshotToOneFollower(followerId int, lastIncludedTer
     var installSnapshotReply InstallSnapshotReply
 
     rf.mu.Lock()
+    if rf.state != "Leader" {
+        rf.mu.Unlock()
+        return
+    }
     DISPrintf("Leader(%d) start to send InstallSnapshot RPC(LeaderTerm=%d, LastIncludedIndex=%d, LastIncludedTerm=%d) to follower(%d)", rf.me, rf.currentTerm, rf.snapshottedIndex, 
         lastIncludedTerm, followerId)
     installSnapshotArgs.LeaderTerm = rf.currentTerm
@@ -869,7 +895,7 @@ func (rf *Raft) sendInstallSnapshotToOneFollower(followerId int, lastIncludedTer
 
     ok := rf.sendInstallSnapshot(followerId, &installSnapshotArgs, &installSnapshotReply)
     rf.mu.Lock()
-    if ok && rf.currentTerm == installSnapshotArgs.LeaderTerm {
+    if ok && rf.state == "Leader" && rf.currentTerm == installSnapshotArgs.LeaderTerm {
         if installSnapshotReply.FollowerTerm > rf.currentTerm {
             rf.currentTerm = installSnapshotReply.FollowerTerm
             rf.mu.Unlock()
@@ -925,9 +951,9 @@ func (rf *Raft) convertToCandidate() {
     rf.electionTime = generateElectionTime()
     rf.electionTimer.Reset(time.Duration(rf.electionTime) * time.Millisecond)
     rf.persist()
+    DLCPrintf("Server (%d)[state=%s, term=%d, votedFor=%d， electionTime=%d] start request votes", rf.me, rf.state, rf.currentTerm, rf.votedFor, rf.electionTime)    
     rf.mu.Unlock()
 
-    DLCPrintf("Server (%d)[state=%s, term=%d, votedFor=%d， electionTime=%d] start request votes", rf.me, rf.state, rf.currentTerm, rf.votedFor, rf.electionTime)    
     // 启动一个线程, requestVote
     go rf.requestForVotes()
 
@@ -979,31 +1005,6 @@ func (rf *Raft) cutoffLogBeforeIndex(lastLogIndex int, lastLogTerm int) {
         DISPrintf("Cut off server(%d) log success and now its len(log)=%d", rf.me, len(rf.log))
     }
 }
-
-
-//
-// printf snapshot
-// type Snapshot struct {
-//    ServerMap       map[string]string // store <key,value>
-//    LastApplyIdMap  map[int64]int64   // store <clerkId,lastApplyRequestUuid>
-//    LastLogIndex        int               // the last applied log's index
-// }
-//
-func DPrintfSnapshot(snapshot Snapshot) {
-    DISPrintf("------ Snapshot Head ------")
-    DISPrintf("Snapshot.ServerMap:")
-    for k,v := range snapshot.ServerMap {
-        DISPrintf("<%s,%s>",k,v)
-    }
-    DISPrintf("Snapshot.LastApplyIdMap:")
-    for k,v := range snapshot.LastApplyIdMap {
-        DISPrintf("<%d,%d>",k,v)
-    }
-    DISPrintf("Snapshot.LastLogIndex: %d", snapshot.LastLogIndex)
-    DISPrintf("------ Snapshot End ------")
-}
-
-
 
 //
 // Index converter
