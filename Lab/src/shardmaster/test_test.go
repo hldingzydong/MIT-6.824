@@ -52,6 +52,9 @@ func check(t *testing.T, groups []int, ck *Clerk) {
 	}
 }
 
+//
+// test if the config c1 == config c2
+//
 func check_same_config(t *testing.T, c1 Config, c2 Config) {
 	if c1.Num != c2.Num {
 		t.Fatalf("Num wrong")
@@ -146,6 +149,9 @@ func TestBasic(t *testing.T) {
 				ck.Move(i, gid3)
 				if cf.Shards[i] != gid3 {
 					cf1 := ck.Query(-1)
+					// 如果此次move使得某个shared移动至新的gid中
+					// 那么这就是一次新的config
+					// Config.Num应该增加
 					if cf1.Num <= cf.Num {
 						t.Fatalf("Move should increase Config.Num")
 					}
@@ -160,6 +166,8 @@ func TestBasic(t *testing.T) {
 				}
 			}
 		}
+		// 经过上述move之后，现在0-4的shard属于group3
+		// 5-9的shared属于group4，依此来check是否成功
 		cf2 := ck.Query(-1)
 		for i := 0; i < NShards; i++ {
 			if i < NShards/2 {
@@ -208,7 +216,13 @@ func TestBasic(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 
 	fmt.Printf("Test: Minimal transfers after joins ...\n")
-
+	// 重新设置shardmaster，加入5个新的gid:11,12,13,14,15
+	// 加入之后,比较加入之前与加入之后的config
+	// 对于加入之后的config中的某些shard，如果它在加入后的config中
+	// 仍属于1-10中的某个gid，check它在加入之前的config中
+	// 是否仍属于该gid，如果不是,说明不是minimal的transfer
+	// 因为要做到minimal的transfer, 需要尽可能不要移动shard的mapping
+	// 即之后属于1-10的，不应该transfer
 	c1 := ck.Query(-1)
 	for i := 0; i < 5; i++ {
 		var gid = int(npara + 1 + i)
