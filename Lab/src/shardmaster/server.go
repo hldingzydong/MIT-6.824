@@ -2,6 +2,7 @@ package shardmaster
 
 import (
 	"../raft"
+	"math"
 	"sync/atomic"
 	"time"
 )
@@ -238,7 +239,7 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 
 			if args.Num < 0 {
 				reply.Config = sm.configs[len(sm.configs)-1]
-			}else{
+			}else if args.Num < len(sm.configs){
 				reply.Config = sm.configs[args.Num]
 			}
 
@@ -268,15 +269,30 @@ func (sm *ShardMaster) DaemonThread() {
 				// according to OpType, reconfig
 				if getOp.OpType != Query {
 					var config Config
-					config.Num = len(sm.configs)
-
+					lastConfig := sm.configs[len(sm.configs)-1]
+					config = sm.createNextConfig()
+					// core: according to last config transfer to
+					// a new config with least transfers
 					switch getOp.OpType {
 						case Join:
+							for gid,servers := range getOp.Servers {
+								newServers := make([]string, len(servers))
+								copy(newServers, servers)
+								config.Groups[gid] = newServers
+								sm.rebalance(&config,Join,gid)
+							}
 
 						case Leave:
+							leaveArg := getOp.GIDs
+							for _,gid := range leaveArg {
+								delete(config.Groups,gid)
+								sm.rebalance(&config,Leave,gid)
+							}
 
 						case Move:
-
+							if lastConfig.Shards[getOp.Shard] != getOp.GID {
+								config.Shards[getOp.Shard] = getOp.GID
+							}
 					}
 					sm.configs = append(sm.configs, config)
 				}
@@ -307,7 +323,80 @@ func (sm *ShardMaster) isDuplicate(clerkId int64, uuid int64) bool {
 	return true
 }
 
+// 对于Join,计算出对于新加的group,要往里面添加几个shard,然后cycle这么多次
+// 每次先找到拥有最多shard的group，然后从他那里夺取一个给新的group
+// Leave 与 Join相反
+func (sm *ShardMaster) rebalance(cfg *Config, request string, gid int) {
+	shardsCount := sm.groupByGid(cfg) // gid -> shards
+	switch request {
+	case "Join":
+		avg := NShards / len(cfg.Groups)
+		for i := 0; i < avg; i++ {
+			maxGid := sm.getMaxShardGid(shardsCount)
+			cfg.Shards[shardsCount[maxGid][0]] = gid
+			shardsCount[maxGid] = shardsCount[maxGid][1:]
+		}
+	case "Leave":
+		shardsArray, exists := shardsCount[gid]
+		if !exists {
+			return
+		}
+		delete(shardsCount, gid)
+		if len(cfg.Groups) == 0 { // remove all gid
+			cfg.Shards = [NShards]int{}
+			return
+		}
+		for _, v := range shardsArray {
+			minGid := sm.getMinShardGid(shardsCount)
+			cfg.Shards[v] = minGid
+			shardsCount[minGid] = append(shardsCount[minGid], v)
+		}
+	}
+}
 
+func (sm *ShardMaster) groupByGid(cfg *Config) map[int][]int {
+	shardsCount := map[int][]int{}
+	for k, _ := range cfg.Groups {
+		shardsCount[k] = []int{}
+	}
+	for k, v := range cfg.Shards {
+		shardsCount[v] = append(shardsCount[v], k)
+	}
+	return shardsCount
+}
+
+func (sm *ShardMaster) getMaxShardGid(shardsCount map[int][]int) int {
+	max := -1
+	var gid int
+	for k, v := range shardsCount {
+		if max < len(v) {
+			max = len(v)
+			gid = k
+		}
+	}
+	return gid
+}
+
+func (sm *ShardMaster) getMinShardGid(shardsCount map[int][]int) int {
+	min := math.MaxInt32
+	var gid int
+	for k, v := range shardsCount {
+		if min > len(v) {
+			min = len(v)
+			gid = k
+		}
+	}
+	return gid
+}
+
+func (sm *ShardMaster) createNextConfig() Config {
+	lastCfg := sm.configs[len(sm.configs)-1]
+	nextCfg := Config{Num: lastCfg.Num + 1, Shards: lastCfg.Shards, Groups: make(map[int][]string)}
+	for gid, servers := range lastCfg.Groups {
+		nextCfg.Groups[gid] = append([]string{}, servers...)
+	}
+	return nextCfg
+}
 //
 // the tester calls Kill() when a ShardMaster instance won't
 // be needed again. you are not required to do anything
