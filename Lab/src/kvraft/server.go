@@ -3,13 +3,13 @@ package kvraft
 import (
 	"../labgob"
 	"../labrpc"
-	"log"
 	"../raft"
+	"bytes"
+	"log"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
-	"strconv"
-	"bytes"
 )
 
 const Debug = 0
