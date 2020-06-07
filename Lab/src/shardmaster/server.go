@@ -330,11 +330,11 @@ func (sm *ShardMaster) rebalance(cfg *Config, request string, gid int) {
 	shardsCount := sm.groupByGid(cfg) // gid -> shards
 	switch request {
 	case "Join":
-		avg := NShards / len(cfg.Groups)
-		for i := 0; i < avg; i++ {
-			maxGid := sm.getMaxShardGid(shardsCount)
-			cfg.Shards[shardsCount[maxGid][0]] = gid
-			shardsCount[maxGid] = shardsCount[maxGid][1:]
+		newGroupShardNum := NShards / len(cfg.Groups)
+		for i := 0; i < newGroupShardNum; i++ {
+			maxShardGid := sm.getMaxShardGid(shardsCount)
+			cfg.Shards[shardsCount[maxShardGid][0]] = gid
+			shardsCount[maxShardGid] = shardsCount[maxShardGid][1:]
 		}
 	case "Leave":
 		shardsArray, exists := shardsCount[gid]
@@ -342,7 +342,8 @@ func (sm *ShardMaster) rebalance(cfg *Config, request string, gid int) {
 			return
 		}
 		delete(shardsCount, gid)
-		if len(cfg.Groups) == 0 { // remove all gid
+		// 如果现在group已经空了，shards就应该为空
+		if len(cfg.Groups) == 0 {
 			cfg.Shards = [NShards]int{}
 			return
 		}
