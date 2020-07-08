@@ -38,11 +38,11 @@ type KVServer struct {
 
 	maxraftstate 	int // snapshot if log grows this big
 
-	lastApplyIdMap	map[int64]int64   // store <clerkId,lastApplyRequestUuid>
+	lastApplyIdMap	map[int64]int64    // store <clerkId,lastApplyRequestUuid>
 	clerkChannelMap map[string]chan Op // store <clerkId+uuid, clerkNotifyChannel>
-	serverMap		map[string]string // store <key,value>   
+	serverMap		map[string]string  // store <key,value>
 
-	lastLogIndex    int               // global view
+	lastLogIndex    int                // global view
 }
 
 

@@ -9,7 +9,7 @@ import "log"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	lastLeaderId int
-	uuidCount int64           // int64 maybe enough to pass the test
+	uuidCount   int64           // int64 maybe enough to pass the test
 	clerkId		int64
 	mu        sync.Mutex
 }

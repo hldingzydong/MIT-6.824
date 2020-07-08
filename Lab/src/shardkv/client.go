@@ -8,7 +8,10 @@ package shardkv
 // talks to the group that holds the key's shard.
 //
 
-import "../labrpc"
+import (
+	"../labrpc"
+	"sync"
+)
 import "crypto/rand"
 import "math/big"
 import "../shardmaster"
@@ -39,7 +42,10 @@ type Clerk struct {
 	sm       *shardmaster.Clerk
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
-	// You will have to modify this struct.
+	// added by developer
+	mu        sync.Mutex
+	uuidCount   int64           // int64 maybe enough to pass the test
+	clerkId		int64
 }
 
 //
@@ -55,7 +61,8 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
-	// You'll have to add code here.
+	ck.uuidCount = 1
+	ck.clerkId = nrand()
 	return ck
 }
 
@@ -68,6 +75,9 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+
+	ck.updateSequenceNumberForGet(&args)
+	args.ClerkId = ck.clerkId
 
 	for {
 		shard := key2shard(key)
@@ -89,10 +99,11 @@ func (ck *Clerk) Get(key string) string {
 		}
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
+		// TODO if this is enough ?
 		ck.config = ck.sm.Query(-1)
-	}
 
-	return ""
+		ck.updateSequenceNumberForGet(&args)
+	}
 }
 
 //
@@ -105,6 +116,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Value = value
 	args.Op = op
 
+	ck.updateSequenceNumberForPut(&args)
+	args.ClerkId = ck.clerkId
 
 	for {
 		shard := key2shard(key)
@@ -126,7 +139,24 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
 		ck.config = ck.sm.Query(-1)
+		ck.updateSequenceNumberForPut(&args)
 	}
+}
+
+func (ck *Clerk) updateSequenceNumberForGet(args *GetArgs) {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	args.Uuid = ck.uuidCount
+	ck.uuidCount++
+}
+
+func (ck *Clerk) updateSequenceNumberForPut(args *PutAppendArgs)  {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+
+	args.Uuid = ck.uuidCount
+	ck.uuidCount++
 }
 
 func (ck *Clerk) Put(key string, value string) {
