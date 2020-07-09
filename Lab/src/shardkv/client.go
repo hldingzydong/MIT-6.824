@@ -99,7 +99,6 @@ func (ck *Clerk) Get(key string) string {
 		}
 		time.Sleep(100 * time.Millisecond)
 		// ask master for the latest configuration.
-		// TODO if this is enough ?
 		ck.config = ck.sm.Query(-1)
 
 		ck.updateSequenceNumberForGet(&args)

@@ -14,6 +14,7 @@ const (
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrNewConfig   = "ErrNewConfig"
 )
 
 type Err string
@@ -40,4 +41,19 @@ type GetArgs struct {
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+//
+// added by develoepr
+//
+type PullKVArgs struct {
+	Shard  			int
+	ConfigNum 		int // 允许从newer config的server上pull, 不允许从older config的server上pull，因为如果从older的server上pull
+						// 可能pull到的data是 stale data， older的server仍在接收client的request
+}
+
+type PullKVReply struct {
+	Err 	   		Err
+	KV  	   		map[string]string
+	LastApplyIdMap  map[int64]int64  // 防止 duplicate request(like Put/Append)
 }

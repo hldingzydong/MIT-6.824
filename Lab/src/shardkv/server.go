@@ -41,12 +41,18 @@ type ShardKV struct {
 	serverMap		map[string]string  // store <key,value>
 
 	lastLogIndex    int                // global view
+
+	pullDataStatus  []bool
 }
 
-
+//
+// RPC handler
+//
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// judge if return ErrWrongGroup
 	shard := key2shard(args.Key)
+	for kv.pullDataStatus[shard] {
+	}
 	kv.mu.Lock()
 	gid := kv.config.Shards[shard]
 	kv.mu.Unlock()
@@ -112,6 +118,8 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// judge if return ErrWrongGroup
 	shard := key2shard(args.Key)
+	for kv.pullDataStatus[shard] {
+	}
 	kv.mu.Lock()
 	gid := kv.config.Shards[shard]
 	kv.mu.Unlock()
@@ -170,6 +178,10 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
+func (kv *ShardKV) PullShardKV(args *PullKVArgs, reply *PullKVReply) {
+
+}
+
 //
 // if the request is ever applied
 //
@@ -191,12 +203,93 @@ func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 	for !kv.killed() {
 		time.Sleep(100 * time.Millisecond)
 
+		newestConfig := kv.sm.Query(-1)
 		kv.mu.Lock()
-		kv.config = kv.sm.Query(-1)
+		if newestConfig.Num != kv.config.Num {
+			for nextConfig := kv.sm.Query(kv.config.Num + 1);; nextConfig = kv.sm.Query(kv.config.Num+1) {
+				pullTargetServers := kv.GenerateJoinShardsAndServers(nextConfig)
+				if len(pullTargetServers) > 0 {
+					for shard, targetServers := range pullTargetServers {
+						success := false
+						for !success {
+							for _, targetServer := range targetServers {
+								args := PullKVArgs{
+									Shard:     shard,
+									ConfigNum: kv.config.Num,
+								}
+								reply := PullKVReply{}
+								ok := kv.make_end(targetServer).Call("ShardKV.PullShardKV", &args, &reply)
+								if ok {
+									if reply.Err == OK {
+										kv.handlePullData(&reply)
+										success = true
+										break
+									} else if reply.Err == ErrWrongLeader || reply.Err == ErrNewConfig {
+										continue
+									} else if reply.Err == ErrNoKey {
+										success = true
+										break
+									}
+								}
+							}
+						}
+					}
+				}
+
+				// update kv.config
+				kv.config = nextConfig
+				if newestConfig.Num == kv.config.Num {
+					break
+				}
+			}
+		}
 		kv.mu.Unlock()
 	}
 }
 
+//
+// @return shard -> server names
+//
+func (kv *ShardKV) GenerateJoinShardsAndServers(latestConfig shardmaster.Config) map[int][]string {
+	pullTargetServers := make(map[int][]string)
+	for shard, latestGid := range latestConfig.Shards {
+		if latestGid == kv.gid && kv.config.Shards[shard] != kv.gid {
+			pullTargetGid := kv.config.Shards[shard]
+			pullTargetServer := kv.config.Groups[pullTargetGid]
+			pullTargetServers[shard] = pullTargetServer
+		}
+	}
+	return pullTargetServers
+}
+
+//
+// seem to be silly for not one pass
+//
+func (kv *ShardKV) GenerateShardKV(shard int) map[string]string {
+	leaveKVs := make(map[string]string)
+	for key, value := range kv.serverMap {
+		currShard := key2shard(key)
+		if currShard == shard {
+			// simplify server implementation
+			leaveKVs[key] = value
+		}
+	}
+	return leaveKVs
+}
+
+func (kv *ShardKV) handlePullData(reply *PullKVReply)  {
+	if len(reply.KV) > 0 {
+		for nKey, nValue := range reply.KV {
+			kv.serverMap[nKey] = nValue
+		}
+	}
+
+	if len(reply.LastApplyIdMap) > 0 {
+		for clerkId, lastRequestId := range reply.LastApplyIdMap {
+			kv.lastApplyIdMap[clerkId] = lastRequestId
+		}
+	}
+}
 
 //
 // backup thread for a kv server
@@ -307,6 +400,12 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.clerkChannelMap = make(map[string]chan Op)
+
+	kv.config = kv.sm.Query(-1)
+	kv.pullDataStatus = make([]bool, len(kv.config.Shards))
+	for i:=0;i<len(kv.pullDataStatus);i++ {
+		kv.pullDataStatus[i] = false
+	}
 
 	// TODO support snapshot
 	kv.lastApplyIdMap = make(map[int64]int64)
