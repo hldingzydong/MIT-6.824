@@ -31,6 +31,7 @@ type ShardKV struct {
 	masters      []*labrpc.ClientEnd
 	maxraftstate int   					// snapshot if log grows this big
 	// added by developer
+	serverId     int64
 	dead    	 int32 					// set by Kill()
 
 	sm       	 *shardmaster.Clerk
@@ -154,15 +155,12 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		timeoutTimer := time.NewTimer(time.Duration(500) * time.Millisecond)
 		select {
 		case <-timeoutTimer.C:
-
 			kv.mu.Lock()
-
 			if kv.isDuplicate(op.OpClerkId, op.OpUuid) {
 				reply.Err = OK
 			} else {
 				reply.Err = ErrWrongLeader
 			}
-
 			delete(kv.clerkChannelMap, requestUuid)
 			kv.mu.Unlock()
 			return
@@ -179,7 +177,51 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *ShardKV) PullShardKV(args *PullKVArgs, reply *PullKVReply) {
+	if kv.config.Num < args.ConfigNum {
+		reply.Err = ErrNewConfig
+		return
+	}
+	var op Op
+	op.OpType = "PullData"
+	op.OpClerkId = args.ServerId
+	op.OpUuid = int64(args.Shard)
 
+	kv.mu.Lock()
+	_, _, isLeader := kv.rf.Start(op)
+	kv.mu.Unlock()
+
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}else{
+		requestUuid := strconv.FormatInt(args.ServerId,10)
+
+		kv.mu.Lock()
+		kv.clerkChannelMap[requestUuid] = make(chan Op, 1)
+		tmpChan := kv.clerkChannelMap[requestUuid]
+		kv.mu.Unlock()
+
+		timeoutTimer := time.NewTimer(time.Duration(500) * time.Millisecond)
+
+		select {
+			case <-timeoutTimer.C:
+				// TODO consider duplicate request
+				reply.Err = ErrWrongLeader
+				kv.mu.Lock()
+				delete(kv.clerkChannelMap, requestUuid)
+				kv.mu.Unlock()
+				return
+
+			case <-tmpChan:
+				kv.mu.Lock()
+				defer kv.mu.Unlock()
+
+				reply.KV = kv.GenerateShardKV(int(op.OpUuid))
+				reply.Err = OK
+				delete(kv.clerkChannelMap, requestUuid)
+				return
+		}
+	}
 }
 
 //
@@ -216,6 +258,7 @@ func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 								args := PullKVArgs{
 									Shard:     shard,
 									ConfigNum: kv.config.Num,
+									ServerId: kv.serverId,
 								}
 								reply := PullKVReply{}
 								ok := kv.make_end(targetServer).Call("ShardKV.PullShardKV", &args, &reply)
@@ -226,9 +269,6 @@ func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 										break
 									} else if reply.Err == ErrWrongLeader || reply.Err == ErrNewConfig {
 										continue
-									} else if reply.Err == ErrNoKey {
-										success = true
-										break
 									}
 								}
 							}
@@ -400,6 +440,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.clerkChannelMap = make(map[string]chan Op)
+
+	kv.serverId = nrand()
 
 	kv.config = kv.sm.Query(-1)
 	kv.pullDataStatus = make([]bool, len(kv.config.Shards))

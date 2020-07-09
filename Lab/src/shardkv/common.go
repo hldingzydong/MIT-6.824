@@ -50,6 +50,7 @@ type PullKVArgs struct {
 	Shard  			int
 	ConfigNum 		int // 允许从newer config的server上pull, 不允许从older config的server上pull，因为如果从older的server上pull
 						// 可能pull到的data是 stale data， older的server仍在接收client的request
+	ServerId      int64
 }
 
 type PullKVReply struct {
