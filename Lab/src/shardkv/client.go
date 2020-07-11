@@ -10,6 +10,7 @@ package shardkv
 
 import (
 	"../labrpc"
+	"log"
 	"sync"
 )
 import "crypto/rand"
@@ -36,6 +37,23 @@ func nrand() int64 {
 	bigx, _ := rand.Int(rand.Reader, max)
 	x := bigx.Int64()
 	return x
+}
+
+const CDebug = 0
+
+func CDPrintf(format string, a ...interface{}) (n int, err error) {
+	if CDebug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
+
+func CDPrintfForPutAppend(key string, value string, op string, serverId int, uuid int64, clerkId int64) {
+	if op == "Put" {
+		CDPrintf("client.go: Clerk(%d) try to put <%s,%s>(uuid=%d) into Server[%d]", clerkId, key, value, uuid, serverId)
+	}else{
+		CDPrintf("client.go: Clerk(%d) try to append <%s,%s>(uuid=%d) into Server[%d]", clerkId, key, value, uuid, serverId)
+	}
 }
 
 type Clerk struct {

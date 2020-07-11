@@ -2,6 +2,7 @@ package shardkv
 
 import (
 	"../shardmaster"
+	"log"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -44,6 +45,15 @@ type ShardKV struct {
 	lastLogIndex    int                // global view
 
 	pullDataStatus  []bool
+}
+
+const Debug = 0
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
 }
 
 //
@@ -184,7 +194,7 @@ func (kv *ShardKV) PullShardKV(args *PullKVArgs, reply *PullKVReply) {
 	var op Op
 	op.OpType = "PullData"
 	op.OpClerkId = args.ServerId
-	op.OpUuid = int64(args.Shard)
+	op.OpUuid = args.Uuid
 
 	kv.mu.Lock()
 	_, _, isLeader := kv.rf.Start(op)
@@ -194,7 +204,7 @@ func (kv *ShardKV) PullShardKV(args *PullKVArgs, reply *PullKVReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}else{
-		requestUuid := strconv.FormatInt(args.ServerId,10)
+		requestUuid := strconv.FormatInt(args.ServerId,10) + strconv.FormatInt(args.Uuid,10)
 
 		kv.mu.Lock()
 		kv.clerkChannelMap[requestUuid] = make(chan Op, 1)
@@ -259,6 +269,7 @@ func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 									Shard:     shard,
 									ConfigNum: kv.config.Num,
 									ServerId: kv.serverId,
+									Uuid: nrand(),
 								}
 								reply := PullKVReply{}
 								ok := kv.make_end(targetServer).Call("ShardKV.PullShardKV", &args, &reply)
@@ -294,9 +305,11 @@ func (kv *ShardKV) GenerateJoinShardsAndServers(latestConfig shardmaster.Config)
 	pullTargetServers := make(map[int][]string)
 	for shard, latestGid := range latestConfig.Shards {
 		if latestGid == kv.gid && kv.config.Shards[shard] != kv.gid {
-			pullTargetGid := kv.config.Shards[shard]
-			pullTargetServer := kv.config.Groups[pullTargetGid]
-			pullTargetServers[shard] = pullTargetServer
+			pullTargetGid:= kv.config.Shards[shard]
+			pullTargetServer, ok := kv.config.Groups[pullTargetGid]
+			if ok {
+				pullTargetServers[shard] = pullTargetServer
+			}
 		}
 	}
 	return pullTargetServers
@@ -350,6 +363,14 @@ func (kv *ShardKV) DaemonThread() {
 
 			// 如果该次applyMsg所对应的request已经apply 过一次,则不会再apply了
 			kv.mu.Lock()
+			if getOp.OpType == "PullData" {
+				clerkChan, ok := kv.clerkChannelMap[requestUuid]
+				if ok {
+					clerkChan <- getOp
+				}
+				kv.mu.Unlock()
+				continue
+			}
 
 			if !kv.isDuplicate(clerkId, uuid) {
 				kv.lastApplyIdMap[clerkId] = uuid
