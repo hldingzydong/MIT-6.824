@@ -217,7 +217,7 @@ func TestMissChange(t *testing.T) {
 	ck := cfg.makeClient()
 
 	cfg.join(0)
-
+	fmt.Println("cfg.join(0)")
 	n := 10
 	ka := make([]string, n)
 	va := make([]string, n)
@@ -231,14 +231,20 @@ func TestMissChange(t *testing.T) {
 	}
 
 	cfg.join(1)
-
+	fmt.Println("cfg.join(1)")
 	cfg.ShutdownServer(0, 0)
+	fmt.Println("cfg.ShutdownServer(0, 0)")
 	cfg.ShutdownServer(1, 0)
+	fmt.Println("cfg.ShutdownServer(1, 0)")
 	cfg.ShutdownServer(2, 0)
+	fmt.Println("cfg.ShutdownServer(2, 0)")
 
 	cfg.join(2)
+	fmt.Println("cfg.join(2)")
 	cfg.leave(1)
+	fmt.Println("cfg.leave(1)")
 	cfg.leave(0)
+	fmt.Println("cfg.leave(0)")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -248,7 +254,7 @@ func TestMissChange(t *testing.T) {
 	}
 
 	cfg.join(1)
-
+	fmt.Println("cfg.join(1)")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 		x := randstring(20)

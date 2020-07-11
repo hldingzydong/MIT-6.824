@@ -191,10 +191,14 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *ShardKV) PullShardKV(args *PullKVArgs, reply *PullKVReply) {
+	kv.mu.Lock()
 	if kv.config.Num < args.ConfigNum {
 		reply.Err = ErrNewConfig
+		kv.mu.Unlock()
 		return
 	}
+	kv.mu.Unlock()
+
 	var op Op
 	op.OpType = "PullData"
 	op.OpClerkId = args.ServerId
@@ -221,6 +225,7 @@ func (kv *ShardKV) PullShardKV(args *PullKVArgs, reply *PullKVReply) {
 		select {
 			case <-timeoutTimer.C:
 				kv.mu.Lock()
+				DPrintf("timeout for Server[server-%d-%d] after receive PullShardKV RPC", kv.gid, kv.me)
 				if kv.isDuplicate(op.OpClerkId, op.OpUuid) {
 					reply.Err = OK
 				} else {
@@ -234,6 +239,7 @@ func (kv *ShardKV) PullShardKV(args *PullKVArgs, reply *PullKVReply) {
 				kv.mu.Lock()
 				defer kv.mu.Unlock()
 
+				DPrintf("Server[server-%d-%d] reply to PullShardKV RPC", kv.gid, kv.me)
 				reply.KV = kv.GenerateShardKV(op.Shard)
 				reply.Err = OK
 				delete(kv.clerkChannelMap, requestUuid)
@@ -261,13 +267,11 @@ func (kv *ShardKV) isDuplicate(clerkId int64, uuid int64) bool {
 //
 func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 	for !kv.killed() {
-		time.Sleep(70 * time.Millisecond)
-
 		newestConfig := kv.sm.Query(-1)
-		kv.mu.Lock()
 		if newestConfig.Num != kv.config.Num {
 			nextConfig := kv.sm.Query(kv.config.Num + 1)
 			for {
+				DPrintf("server.go: Server[server-%d-%d] start to upgrade config from (%d) to (%d)", kv.gid, kv.me, kv.config.Num, nextConfig.Num)
 				pullTargetServers := kv.GenerateJoinShardsAndServers(nextConfig)
 				if len(pullTargetServers) > 0 {
 					for shard, targetServers := range pullTargetServers {
@@ -282,15 +286,17 @@ func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 									Uuid: kv.uuidCount,
 								}
 								kv.uuidCount++
-
 								reply := PullKVReply{}
+								DPrintf("server.go: Server[server-%d-%d] try to pull shard(%d) from Server[%s] during upgrade to config[%d -> %d]", kv.gid, kv.me, shard, targetServer, kv.config.Num, nextConfig.Num)
 								ok := kv.make_end(targetServer).Call("ShardKV.PullShardKV", &args, &reply)
 								if ok {
 									if reply.Err == OK {
+										DPrintf("server.go: Server[server-%d-%d] receive shard(%d) data from Server[%s] during upgrade to config[%d -> %d]", kv.gid, kv.me, shard, targetServer, kv.config.Num, nextConfig.Num)
 										kv.handlePullData(&reply)
 										success = true
 										break
 									} else if reply.Err == ErrWrongLeader || reply.Err == ErrNewConfig {
+										DPrintf("server.go: Server[server-%d-%d] receive %s from Server[%s] during upgrade to config[%d -> %d]", kv.gid, kv.me, reply.Err, targetServer, kv.config.Num, nextConfig.Num)
 										continue
 									}
 								}
@@ -299,7 +305,7 @@ func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 						kv.pullDataStatus[shard] = false
 					}
 				}
-
+				DPrintf("server.go: Server[server-%d-%d] finish upgrade config from (%d) to (%d)", kv.gid, kv.me, kv.config.Num, nextConfig.Num)
 				// update kv.config
 				kv.config = nextConfig
 				if newestConfig.Num == kv.config.Num {
@@ -308,7 +314,8 @@ func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 				nextConfig = kv.sm.Query(kv.config.Num+1)
 			}
 		}
-		kv.mu.Unlock()
+
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -345,6 +352,9 @@ func (kv *ShardKV) GenerateShardKV(shard int) map[string]string {
 }
 
 func (kv *ShardKV) handlePullData(reply *PullKVReply)  {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
 	if len(reply.KV) > 0 {
 		for nKey, nValue := range reply.KV {
 			kv.serverMap[nKey] = nValue
@@ -382,6 +392,7 @@ func (kv *ShardKV) callRaftStartSnapshot() {
 	e.Encode(kv.serverMap)
 	e.Encode(kv.lastApplyIdMap)
 	e.Encode(kv.lastLogIndex)
+	e.Encode(kv.config.Num)
 	snapshotInBytes := w.Bytes()
 
 	kv.rf.StartSnapshot(snapshotInBytes)
@@ -523,12 +534,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.serverId = nrand()
 	kv.uuidCount = 0
 
-	kv.config = kv.sm.Query(-1)
-	kv.pullDataStatus = make([]bool, len(kv.config.Shards))
-	for i:=0;i<len(kv.pullDataStatus);i++ {
-		kv.pullDataStatus[i] = false
-	}
-
 	// support snapshot
 	snapshotInBytes := kv.rf.ReadPersistSnapshot()
 	if len(snapshotInBytes) > 0 {
@@ -538,19 +543,25 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		if d.Decode(&snapshot.ServerMap) != nil || d.Decode(&snapshot.LastApplyIdMap) != nil {
 			return nil
 		}
-		if d.Decode(&snapshot.LastLogIndex) != nil {
+		if d.Decode(&snapshot.LastLogIndex) != nil || d.Decode(&snapshot.ConfigNum) != nil {
 			return nil
 		}
 
 		kv.lastApplyIdMap = snapshot.LastApplyIdMap
 		kv.serverMap = snapshot.ServerMap
 		kv.lastLogIndex = snapshot.LastLogIndex
+		kv.config = kv.sm.Query(snapshot.ConfigNum)
 	}else{
 		kv.lastApplyIdMap = make(map[int64]int64)
 		kv.serverMap = make(map[string]string)
 		kv.lastLogIndex = 0
+		kv.config = kv.sm.Query(-1)
 	}
 
+	kv.pullDataStatus = make([]bool, len(kv.config.Shards))
+	for i:=0;i<len(kv.pullDataStatus);i++ {
+		kv.pullDataStatus[i] = false
+	}
 
 	go kv.DaemonThread()
 	go kv.PullConfigurationFromShardMaster()
