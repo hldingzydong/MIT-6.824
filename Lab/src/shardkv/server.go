@@ -2,6 +2,7 @@ package shardkv
 
 import (
 	"../shardmaster"
+	"bytes"
 	"log"
 	"strconv"
 	"sync/atomic"
@@ -20,6 +21,7 @@ type Op struct {
 	OpUuid   	int64
 	Key			string
 	Value		string
+	Shard       int
 }
 
 type ShardKV struct {
@@ -195,6 +197,7 @@ func (kv *ShardKV) PullShardKV(args *PullKVArgs, reply *PullKVReply) {
 	op.OpType = "PullData"
 	op.OpClerkId = args.ServerId
 	op.OpUuid = args.Uuid
+	op.Shard = args.Shard
 
 	kv.mu.Lock()
 	_, _, isLeader := kv.rf.Start(op)
@@ -226,7 +229,7 @@ func (kv *ShardKV) PullShardKV(args *PullKVArgs, reply *PullKVReply) {
 				kv.mu.Lock()
 				defer kv.mu.Unlock()
 
-				reply.KV = kv.GenerateShardKV(int(op.OpUuid))
+				reply.KV = kv.GenerateShardKV(op.Shard)
 				reply.Err = OK
 				delete(kv.clerkChannelMap, requestUuid)
 				return
@@ -345,6 +348,35 @@ func (kv *ShardKV) handlePullData(reply *PullKVReply)  {
 }
 
 //
+// detect snapshot
+//
+func (kv *ShardKV) isNeedToSnapshot() bool {
+	if kv.maxraftstate < 0 {
+		return false
+	}
+	maxRaftPersistSize := kv.maxraftstate * 9 / 10
+	raftSize := kv.rf.ReadPersistSnapshotSize()
+	if raftSize > maxRaftPersistSize {
+		return true
+	}
+	return false
+}
+
+//
+// do snapshot
+//
+func (kv *ShardKV) callRaftStartSnapshot() {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.serverMap)
+	e.Encode(kv.lastApplyIdMap)
+	e.Encode(kv.lastLogIndex)
+	snapshotInBytes := w.Bytes()
+
+	kv.rf.StartSnapshot(snapshotInBytes)
+}
+
+//
 // backup thread for a kv server
 // read apply message from applyCh and update its <k,v>
 // and notify RPC handler reply to clerks
@@ -353,9 +385,19 @@ func (kv *ShardKV) DaemonThread() {
 	for !kv.killed() {
 		applyMsg := <- kv.applyCh
 		if !applyMsg.CommandValid {
-			continue
+			// this is a snapshot come from Leader
+			snapshotInBytes := applyMsg.CommandSnapshot
+			kv.mu.Lock()
+			r := bytes.NewBuffer(snapshotInBytes)
+			d := labgob.NewDecoder(r)
+			if d.Decode(&kv.serverMap) != nil || d.Decode(&kv.lastApplyIdMap) != nil {
+				kv.mu.Unlock()
+				continue
+			}
+			kv.mu.Unlock()
 		}else{
 			getOp := applyMsg.Command.(Op)
+			getIndex := applyMsg.CommandIndex
 
 			clerkId := getOp.OpClerkId
 			uuid := getOp.OpUuid
@@ -363,6 +405,10 @@ func (kv *ShardKV) DaemonThread() {
 
 			// 如果该次applyMsg所对应的request已经apply 过一次,则不会再apply了
 			kv.mu.Lock()
+			if getIndex > kv.lastLogIndex {
+				kv.lastLogIndex = getIndex
+			}
+
 			if getOp.OpType == "PullData" {
 				clerkChan, ok := kv.clerkChannelMap[requestUuid]
 				if ok {
@@ -385,7 +431,16 @@ func (kv *ShardKV) DaemonThread() {
 						kv.serverMap[getOp.Key] = getOp.Value
 					}
 				}
+
+				// check if need to install snapshot
+				if kv.isNeedToSnapshot() {
+					kv.callRaftStartSnapshot()
+				}
 			} else{
+				// check if need to install snapshot
+				if kv.isNeedToSnapshot() {
+					kv.callRaftStartSnapshot()
+				}
 				kv.mu.Unlock()
 				continue
 			}
@@ -470,10 +525,31 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		kv.pullDataStatus[i] = false
 	}
 
-	// TODO support snapshot
-	kv.lastApplyIdMap = make(map[int64]int64)
-	kv.serverMap = make(map[string]string)
-	kv.lastLogIndex = 0
+	// support snapshot
+	snapshotInBytes := kv.rf.ReadPersistSnapshot()
+	if len(snapshotInBytes) > 0 {
+		DPrintf("server.go: Server(%d) read snapshot from its persister", kv.me)
+		r := bytes.NewBuffer(snapshotInBytes)
+		d := labgob.NewDecoder(r)
+		var snapshot raft.Snapshot
+		if d.Decode(&snapshot.ServerMap) != nil || d.Decode(&snapshot.LastApplyIdMap) != nil {
+			DPrintf("read snapshot error")
+			return nil
+		}
+		if d.Decode(&snapshot.LastLogIndex) != nil {
+			DPrintf("read snapshot error")
+			return nil
+		}
+
+		kv.lastApplyIdMap = snapshot.LastApplyIdMap
+		kv.serverMap = snapshot.ServerMap
+		kv.lastLogIndex = snapshot.LastLogIndex
+	}else{
+		kv.lastApplyIdMap = make(map[int64]int64)
+		kv.serverMap = make(map[string]string)
+		kv.lastLogIndex = 0
+	}
+
 
 	go kv.DaemonThread()
 	go kv.PullConfigurationFromShardMaster()
