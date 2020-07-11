@@ -47,6 +47,8 @@ type ShardKV struct {
 	lastLogIndex    int                // global view
 
 	pullDataStatus  []bool
+
+	uuidCount		int64
 }
 
 const Debug = 0
@@ -218,9 +220,12 @@ func (kv *ShardKV) PullShardKV(args *PullKVArgs, reply *PullKVReply) {
 
 		select {
 			case <-timeoutTimer.C:
-				// TODO consider duplicate request
-				reply.Err = ErrWrongLeader
 				kv.mu.Lock()
+				if kv.isDuplicate(op.OpClerkId, op.OpUuid) {
+					reply.Err = OK
+				} else {
+					reply.Err = ErrWrongLeader
+				}
 				delete(kv.clerkChannelMap, requestUuid)
 				kv.mu.Unlock()
 				return
@@ -256,15 +261,17 @@ func (kv *ShardKV) isDuplicate(clerkId int64, uuid int64) bool {
 //
 func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 	for !kv.killed() {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(70 * time.Millisecond)
 
 		newestConfig := kv.sm.Query(-1)
 		kv.mu.Lock()
 		if newestConfig.Num != kv.config.Num {
-			for nextConfig := kv.sm.Query(kv.config.Num + 1);; nextConfig = kv.sm.Query(kv.config.Num+1) {
+			nextConfig := kv.sm.Query(kv.config.Num + 1)
+			for {
 				pullTargetServers := kv.GenerateJoinShardsAndServers(nextConfig)
 				if len(pullTargetServers) > 0 {
 					for shard, targetServers := range pullTargetServers {
+						kv.pullDataStatus[shard] = true
 						success := false
 						for !success {
 							for _, targetServer := range targetServers {
@@ -272,8 +279,10 @@ func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 									Shard:     shard,
 									ConfigNum: kv.config.Num,
 									ServerId: kv.serverId,
-									Uuid: nrand(),
+									Uuid: kv.uuidCount,
 								}
+								kv.uuidCount++
+
 								reply := PullKVReply{}
 								ok := kv.make_end(targetServer).Call("ShardKV.PullShardKV", &args, &reply)
 								if ok {
@@ -287,6 +296,7 @@ func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 								}
 							}
 						}
+						kv.pullDataStatus[shard] = false
 					}
 				}
 
@@ -295,6 +305,7 @@ func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 				if newestConfig.Num == kv.config.Num {
 					break
 				}
+				nextConfig = kv.sm.Query(kv.config.Num+1)
 			}
 		}
 		kv.mu.Unlock()
@@ -391,8 +402,9 @@ func (kv *ShardKV) DaemonThread() {
 			r := bytes.NewBuffer(snapshotInBytes)
 			d := labgob.NewDecoder(r)
 			if d.Decode(&kv.serverMap) != nil || d.Decode(&kv.lastApplyIdMap) != nil {
+				// decode meet error, so end up
 				kv.mu.Unlock()
-				continue
+				return
 			}
 			kv.mu.Unlock()
 		}else{
@@ -407,15 +419,6 @@ func (kv *ShardKV) DaemonThread() {
 			kv.mu.Lock()
 			if getIndex > kv.lastLogIndex {
 				kv.lastLogIndex = getIndex
-			}
-
-			if getOp.OpType == "PullData" {
-				clerkChan, ok := kv.clerkChannelMap[requestUuid]
-				if ok {
-					clerkChan <- getOp
-				}
-				kv.mu.Unlock()
-				continue
 			}
 
 			if !kv.isDuplicate(clerkId, uuid) {
@@ -518,6 +521,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.clerkChannelMap = make(map[string]chan Op)
 
 	kv.serverId = nrand()
+	kv.uuidCount = 0
 
 	kv.config = kv.sm.Query(-1)
 	kv.pullDataStatus = make([]bool, len(kv.config.Shards))
@@ -528,16 +532,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// support snapshot
 	snapshotInBytes := kv.rf.ReadPersistSnapshot()
 	if len(snapshotInBytes) > 0 {
-		DPrintf("server.go: Server(%d) read snapshot from its persister", kv.me)
 		r := bytes.NewBuffer(snapshotInBytes)
 		d := labgob.NewDecoder(r)
 		var snapshot raft.Snapshot
 		if d.Decode(&snapshot.ServerMap) != nil || d.Decode(&snapshot.LastApplyIdMap) != nil {
-			DPrintf("read snapshot error")
 			return nil
 		}
 		if d.Decode(&snapshot.LastLogIndex) != nil {
-			DPrintf("read snapshot error")
 			return nil
 		}
 

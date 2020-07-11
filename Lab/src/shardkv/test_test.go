@@ -23,7 +23,7 @@ func check(t *testing.T, ck *Clerk, key string, value string) {
 //
 // test static 2-way sharding, without shard movement.
 //
-/*func TestStaticShards(t *testing.T) {
+func TestStaticShards(t *testing.T) {
 	fmt.Printf("Test: static shards ...\n")
 
 	cfg := make_config(t, 3, false, -1)
@@ -138,7 +138,7 @@ func TestJoinLeave(t *testing.T) {
 	}
 
 	fmt.Printf("  ... Passed\n")
-}*/
+}
 
 func TestSnapshot(t *testing.T) {
 	fmt.Printf("Test: snapshots, join, and leave ...\n")

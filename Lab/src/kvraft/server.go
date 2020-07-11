@@ -198,6 +198,7 @@ func (kv *KVServer) DaemonThread() {
 			r := bytes.NewBuffer(snapshotInBytes)
     		d := labgob.NewDecoder(r)
     		if d.Decode(&kv.serverMap) != nil || d.Decode(&kv.lastApplyIdMap) != nil {
+    			kv.mu.Unlock()
         		return
     		}
 			kv.mu.Unlock()
