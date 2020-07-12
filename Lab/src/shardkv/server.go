@@ -102,6 +102,8 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		select {
 		case <-timeoutTimer.C:
 			kv.mu.Lock()
+			defer kv.mu.Unlock()
+
 			if kv.isDuplicate(args.ClerkId, args.Uuid) {
 				reply.Err = OK
 				reply.Value = kv.serverMap[op.Key]
@@ -110,7 +112,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			}
 
 			delete(kv.clerkChannelMap, requestUuid)
-			kv.mu.Unlock()
 			return
 
 		case <-tmpChan:
@@ -170,13 +171,14 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		select {
 		case <-timeoutTimer.C:
 			kv.mu.Lock()
+			defer kv.mu.Unlock()
+
 			if kv.isDuplicate(op.OpClerkId, op.OpUuid) {
 				reply.Err = OK
 			} else {
 				reply.Err = ErrWrongLeader
 			}
 			delete(kv.clerkChannelMap, requestUuid)
-			kv.mu.Unlock()
 			return
 
 		case <-tmpChan:
@@ -225,14 +227,17 @@ func (kv *ShardKV) PullShardKV(args *PullKVArgs, reply *PullKVReply) {
 		select {
 			case <-timeoutTimer.C:
 				kv.mu.Lock()
+				defer kv.mu.Unlock()
+
 				DPrintf("timeout for Server[server-%d-%d] after receive PullShardKV RPC", kv.gid, kv.me)
 				if kv.isDuplicate(op.OpClerkId, op.OpUuid) {
+					reply.KV = kv.GenerateShardKV(op.Shard)
 					reply.Err = OK
+					reply.LastApplyIdMap = kv.GenerateLastApplyIdMap()
 				} else {
 					reply.Err = ErrWrongLeader
 				}
 				delete(kv.clerkChannelMap, requestUuid)
-				kv.mu.Unlock()
 				return
 
 			case <-tmpChan:
@@ -242,6 +247,8 @@ func (kv *ShardKV) PullShardKV(args *PullKVArgs, reply *PullKVReply) {
 				DPrintf("Server[server-%d-%d] reply to PullShardKV RPC", kv.gid, kv.me)
 				reply.KV = kv.GenerateShardKV(op.Shard)
 				reply.Err = OK
+				reply.LastApplyIdMap = kv.GenerateLastApplyIdMap()
+
 				delete(kv.clerkChannelMap, requestUuid)
 				return
 		}
@@ -279,6 +286,7 @@ func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 						success := false
 						for !success {
 							for _, targetServer := range targetServers {
+								kv.mu.Lock()
 								args := PullKVArgs{
 									Shard:     shard,
 									ConfigNum: kv.config.Num,
@@ -286,6 +294,8 @@ func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 									Uuid: kv.uuidCount,
 								}
 								kv.uuidCount++
+								kv.mu.Unlock()
+
 								reply := PullKVReply{}
 								DPrintf("server.go: Server[server-%d-%d] try to pull shard(%d) from Server[%s] during upgrade to config[%d -> %d]", kv.gid, kv.me, shard, targetServer, kv.config.Num, nextConfig.Num)
 								ok := kv.make_end(targetServer).Call("ShardKV.PullShardKV", &args, &reply)
@@ -307,7 +317,10 @@ func (kv *ShardKV) PullConfigurationFromShardMaster()  {
 				}
 				DPrintf("server.go: Server[server-%d-%d] finish upgrade config from (%d) to (%d)", kv.gid, kv.me, kv.config.Num, nextConfig.Num)
 				// update kv.config
+				kv.mu.Lock()
 				kv.config = nextConfig
+				kv.mu.Unlock()
+
 				if newestConfig.Num == kv.config.Num {
 					break
 				}
@@ -351,6 +364,15 @@ func (kv *ShardKV) GenerateShardKV(shard int) map[string]string {
 	return leaveKVs
 }
 
+func (kv *ShardKV) GenerateLastApplyIdMap() map[int64]int64 {
+	lastApplyIdMap := make(map[int64]int64)
+	for key,value := range kv.lastApplyIdMap {
+		lastApplyIdMap[key] = value
+	}
+	return lastApplyIdMap
+}
+
+
 func (kv *ShardKV) handlePullData(reply *PullKVReply)  {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -393,6 +415,8 @@ func (kv *ShardKV) callRaftStartSnapshot() {
 	e.Encode(kv.lastApplyIdMap)
 	e.Encode(kv.lastLogIndex)
 	e.Encode(kv.config.Num)
+	e.Encode(kv.serverId)
+	e.Encode(kv.uuidCount)
 	snapshotInBytes := w.Bytes()
 
 	kv.rf.StartSnapshot(snapshotInBytes)
@@ -407,13 +431,11 @@ func (kv *ShardKV) DaemonThread() {
 	for !kv.killed() {
 		applyMsg := <- kv.applyCh
 		if !applyMsg.CommandValid {
-			// this is a snapshot come from Leader
 			snapshotInBytes := applyMsg.CommandSnapshot
 			kv.mu.Lock()
 			r := bytes.NewBuffer(snapshotInBytes)
 			d := labgob.NewDecoder(r)
 			if d.Decode(&kv.serverMap) != nil || d.Decode(&kv.lastApplyIdMap) != nil {
-				// decode meet error, so end up
 				kv.mu.Unlock()
 				return
 			}
@@ -531,9 +553,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.clerkChannelMap = make(map[string]chan Op)
 
-	kv.serverId = nrand()
-	kv.uuidCount = 0
-
 	// support snapshot
 	snapshotInBytes := kv.rf.ReadPersistSnapshot()
 	if len(snapshotInBytes) > 0 {
@@ -546,16 +565,23 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		if d.Decode(&snapshot.LastLogIndex) != nil || d.Decode(&snapshot.ConfigNum) != nil {
 			return nil
 		}
+		if d.Decode(&snapshot.ServerId) != nil || d.Decode(&snapshot.UuidCount) != nil {
+			return nil
+		}
 
 		kv.lastApplyIdMap = snapshot.LastApplyIdMap
 		kv.serverMap = snapshot.ServerMap
 		kv.lastLogIndex = snapshot.LastLogIndex
 		kv.config = kv.sm.Query(snapshot.ConfigNum)
+		kv.serverId = snapshot.ServerId
+		kv.uuidCount = snapshot.UuidCount
 	}else{
 		kv.lastApplyIdMap = make(map[int64]int64)
 		kv.serverMap = make(map[string]string)
 		kv.lastLogIndex = 0
 		kv.config = kv.sm.Query(-1)
+		kv.serverId = nrand()
+		kv.uuidCount = 0
 	}
 
 	kv.pullDataStatus = make([]bool, len(kv.config.Shards))

@@ -59,7 +59,10 @@ const(
 type Snapshot struct {
     ServerMap       map[string]string // store <key,value>
     LastApplyIdMap  map[int64]int64   // store <clerkId,lastApplyRequestUuid>
-    LastLogIndex        int               // the last applied log's index, view from kv server 
+    LastLogIndex    int               // the last applied log's index, view from kv server
+    ConfigNum       int
+    ServerId        int64
+    UuidCount       int64
 }
 
 /*
