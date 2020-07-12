@@ -67,6 +67,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// judge if return ErrWrongGroup
 	shard := key2shard(args.Key)
 	for kv.pullDataStatus[shard] {
+		time.Sleep(time.Millisecond)
 	}
 	kv.mu.Lock()
 	gid := kv.config.Shards[shard]
@@ -104,7 +105,9 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			kv.mu.Lock()
 			defer kv.mu.Unlock()
 
-			if kv.isDuplicate(args.ClerkId, args.Uuid) {
+			if !kv.checkRightShardGroup(shard) {
+				reply.Err = ErrWrongGroup
+			} else if kv.isDuplicate(args.ClerkId, args.Uuid) {
 				reply.Err = OK
 				reply.Value = kv.serverMap[op.Key]
 			} else {
@@ -118,12 +121,16 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			kv.mu.Lock()
 			defer kv.mu.Unlock()
 
-			lastValue, ok := kv.serverMap[op.Key]
-			if ok {
-				reply.Err = OK
-				reply.Value = lastValue
+			if !kv.checkRightShardGroup(shard) {
+				reply.Err = ErrWrongGroup
 			} else {
-				reply.Err = ErrNoKey
+				lastValue, ok := kv.serverMap[op.Key]
+				if ok {
+					reply.Err = OK
+					reply.Value = lastValue
+				} else {
+					reply.Err = ErrNoKey
+				}
 			}
 			delete(kv.clerkChannelMap, requestUuid)
 			return
@@ -135,6 +142,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// judge if return ErrWrongGroup
 	shard := key2shard(args.Key)
 	for kv.pullDataStatus[shard] {
+		time.Sleep(time.Millisecond)
 	}
 	kv.mu.Lock()
 	gid := kv.config.Shards[shard]
@@ -173,7 +181,9 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			kv.mu.Lock()
 			defer kv.mu.Unlock()
 
-			if kv.isDuplicate(op.OpClerkId, op.OpUuid) {
+			if !kv.checkRightShardGroup(shard) {
+				reply.Err = ErrWrongGroup
+			} else if kv.isDuplicate(op.OpClerkId, op.OpUuid) {
 				reply.Err = OK
 			} else {
 				reply.Err = ErrWrongLeader
@@ -185,7 +195,11 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			kv.mu.Lock()
 			defer kv.mu.Unlock()
 
-			reply.Err = OK
+			if !kv.checkRightShardGroup(shard) {
+				reply.Err = ErrWrongGroup
+			}else {
+				reply.Err = OK
+			}
 			delete(kv.clerkChannelMap, requestUuid)
 			return
 		}
@@ -457,14 +471,16 @@ func (kv *ShardKV) DaemonThread() {
 			if !kv.isDuplicate(clerkId, uuid) {
 				kv.lastApplyIdMap[clerkId] = uuid
 
-				if getOp.OpType == "Put" {
-					kv.serverMap[getOp.Key] = getOp.Value
-				}else if getOp.OpType == "Append" {
-					lastValue, ok := kv.serverMap[getOp.Key]
-					if ok {
-						kv.serverMap[getOp.Key] = lastValue + getOp.Value
-					}else{
+				if kv.checkRightShardGroup(key2shard(getOp.Key)) {
+					if getOp.OpType == "Put" {
 						kv.serverMap[getOp.Key] = getOp.Value
+					}else if getOp.OpType == "Append" {
+						lastValue, ok := kv.serverMap[getOp.Key]
+						if ok {
+							kv.serverMap[getOp.Key] = lastValue + getOp.Value
+						}else{
+							kv.serverMap[getOp.Key] = getOp.Value
+						}
 					}
 				}
 
@@ -488,6 +504,13 @@ func (kv *ShardKV) DaemonThread() {
 			kv.mu.Unlock()
 		}
 	}
+}
+
+func (kv *ShardKV) checkRightShardGroup(shard int) bool {
+	if shard > -1 && shard < len(kv.config.Shards) && kv.gid == kv.config.Shards[shard] {
+		return true
+	}
+	return false
 }
 
 //
